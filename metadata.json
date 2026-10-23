@@ -1,0 +1,6 @@
+{
+  "name": "Grimório de Giz: Worms Arcano",
+  "description": "Jogo de artilharia tática em turnos estilo Worms 1 em pixel art com poderes mágicos da natureza, objetos escolares, terreno destrutível, progressão de níveis e multiplayer local.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

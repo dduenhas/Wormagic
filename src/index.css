@@ -1,0 +1,53 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-pixel: 'Press Start 2P', monospace;
+    --font-silk: 'Silkscreen', monospace;
+    --font-mono: 'JetBrains Mono', monospace;
+    --font-sans: 'Plus Jakarta Sans', sans-serif;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background-color: #0F0E17;
+    color: #F4F1DE;
+    user-select: none;
+  }
+}
+
+.font-pixel {
+  font-family: var(--font-pixel);
+}
+
+.font-silk {
+  font-family: var(--font-silk);
+}
+
+.font-mono-num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.pixelated {
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+.pixel-panel {
+  background-color: rgba(26, 24, 41, 0.94);
+  border: 2px solid #3D3859;
+  box-shadow: 0 4px 0 #09080E;
+}
+
+.pixel-btn {
+  border: 2px solid #3D3859;
+  box-shadow: 0 3px 0 #09080E;
+  transition: transform 80ms ease, background-color 120ms ease, border-color 120ms ease;
+}
+
+.pixel-btn:active:not(:disabled) {
+  transform: translateY(2px);
+  box-shadow: 0 1px 0 #09080E;
+}
+
