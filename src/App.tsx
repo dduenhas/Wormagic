@@ -5,11 +5,10 @@ import {
   Cpu,
   Flame,
   Layers,
-  Maximize2,
-  Minimize2,
   Palette,
   RotateCcw,
   SkipForward,
+  Sparkles,
   Volume2,
   VolumeX,
   Wind,
@@ -54,6 +53,7 @@ import {
   drawWindStreamlines,
   drawWormAimHUD,
   generatePixelTerrain,
+  renderWeaponPixelIcon,
 } from './utils/pixelArtRenderer';
 import { soundFX } from './utils/sound';
 
@@ -61,6 +61,7 @@ const CANVAS_W = 1280;
 const CANVAS_H = 720;
 const WATER_Y = CANVAS_H - 42;
 const TURN_TIME_SECONDS = 40;
+const SPOTLIGHT_TOTAL_FRAMES = 74; // ~1.2s zoom-in on active worm then rapid return to wide shot
 
 const STORAGE_KEY_PROGRESSION = 'grimorio_giz_progression_v1';
 
@@ -181,20 +182,13 @@ export default function App() {
   // Direct-Hit Knockout Option (Default: false, keeps standard HP reduction)
   const [instantKODirectHit, setInstantKODirectHit] = useState<boolean>(false);
 
-  // Responsive Smart Camera Follow (automatically enabled on small screens < 768px, toggleable anytime)
-  const [smartCameraZoom, setSmartCameraZoom] = useState<boolean>(() =>
-    typeof window !== 'undefined' ? window.innerWidth < 768 : false
-  );
-
-  useEffect(() => {
-    const handleResize = () => {
-      if (window.innerWidth < 768) {
-        setSmartCameraZoom(true);
-      }
-    };
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
-  }, []);
+  // Virtual Joystick visual knob state for mobile/touch overlay
+  const [joystickKnob, setJoystickKnob] = useState<{ x: number; y: number; active: boolean }>({
+    x: 0,
+    y: 0,
+    active: false,
+  });
+  const joystickBaseRef = useRef<HTMLDivElement | null>(null);
 
   // Persistent Level & XP Progression
   const [progression, setProgression] = useState<PlayerProgression>(() => {
@@ -283,11 +277,13 @@ export default function App() {
     keys: Record<string, boolean>;
     touchMoveDir: -1 | 0 | 1;
     touchAimDir: -1 | 0 | 1;
+    joystickVector: { x: number; y: number; active: boolean };
     mouseCanvasPos: { x: number; y: number } | null;
     cameraShake: number;
     cameraX: number;
     cameraY: number;
     cameraZoom: number;
+    turnSpotlightTimer: number; // Counts down from SPOTLIGHT_TOTAL_FRAMES -> 0 on each turn start
     hitStopFrames: number;
     lightningBolts: { x: number; y: number; life: number }[];
     tick: number;
@@ -313,11 +309,13 @@ export default function App() {
     keys: {},
     touchMoveDir: 0,
     touchAimDir: 0,
+    joystickVector: { x: 0, y: 0, active: false },
     mouseCanvasPos: null,
     cameraShake: 0,
     cameraX: CANVAS_W / 2,
     cameraY: CANVAS_H / 2,
     cameraZoom: 1,
+    turnSpotlightTimer: SPOTLIGHT_TOTAL_FRAMES,
     hitStopFrames: 0,
     lightningBolts: [],
     tick: 0,
@@ -493,15 +491,17 @@ export default function App() {
         keys: {},
         touchMoveDir: 0,
         touchAimDir: 0,
+        joystickVector: { x: 0, y: 0, active: false },
         mouseCanvasPos: null,
         cameraShake: 0,
-        cameraX: firstWorm ? firstWorm.x : CANVAS_W / 2,
-        cameraY: firstWorm ? firstWorm.y : CANVAS_H / 2,
+        cameraX: CANVAS_W / 2,
+        cameraY: CANVAS_H / 2,
         cameraZoom: 1,
+        turnSpotlightTimer: SPOTLIGHT_TOTAL_FRAMES,
         hitStopFrames: 0,
         lightningBolts: [],
         tick: 0,
-        botThinkingTimer: 55,
+        botThinkingTimer: 95,
       };
 
       setVictoryTeam(null);
@@ -516,7 +516,7 @@ export default function App() {
     [teams, activeTeamCount, selectedBiomeId, gameplayMode, findSurfaceY]
   );
 
-  // Advance to next alive team & worm turn
+  // Advance to next alive team & worm turn (triggers the Turn Spotlight Zoom-In -> Wide Overview camera!)
   const advanceTurn = useCallback(() => {
     const st = engineRef.current;
     const aliveTeams = new Set(
@@ -561,7 +561,9 @@ export default function App() {
     st.powerDirection = 1;
     st.touchMoveDir = 0;
     st.touchAimDir = 0;
-    st.botThinkingTimer = 65;
+    st.joystickVector = { x: 0, y: 0, active: false };
+    st.turnSpotlightTimer = SPOTLIGHT_TOTAL_FRAMES;
+    st.botThinkingTimer = 105; // Wait for spotlight zoom to finish before bot fires
 
     if (Math.random() < 0.5 && st.crates.filter((c) => !c.collected).length < 3) {
       st.crates.push({
@@ -582,6 +584,7 @@ export default function App() {
     setChargePower(0);
     setIsCharging(false);
     setActiveStamina(100);
+    setJoystickKnob({ x: 0, y: 0, active: false });
     soundFX.playTurnStart();
   }, [activeTeamCount, teams, gameplayMode, awardXp]);
 
@@ -681,6 +684,7 @@ export default function App() {
 
       st.charging = false;
       st.power = 0;
+      st.turnSpotlightTimer = 0; // Ensure wide view when firing
       st.phase = 'PROJECTILE_FLYING';
       setIsCharging(false);
       setChargePower(0);
@@ -697,7 +701,6 @@ export default function App() {
         SPELL_ARSENAL.find((w) => w.id === proj.weaponId) || SPELL_ARSENAL[0];
       const tCtx = terrainCanvasRef.current?.getContext('2d');
 
-      // Special Case 1: Crystal Ruler Teleport
       if (weapon.projectileType === 'teleport') {
         const activeWorm = st.worms.find((w) => w.id === st.activeWormId && w.isAlive);
         if (activeWorm) {
@@ -733,7 +736,6 @@ export default function App() {
         return;
       }
 
-      // Special Case 2: Meteor Protractor spawns 3 sky meteors
       if (weapon.projectileType === 'meteor_shower' && !proj.isChildFragment) {
         soundFX.playCastSpell(0.8, true);
         for (let m = -1; m <= 1; m++) {
@@ -789,7 +791,6 @@ export default function App() {
         });
       }
 
-      // Spawn child fragments for Chalk Cluster grenade
       if (weapon.id === 'chalk_cluster' && !proj.isChildFragment) {
         const colors = ['#EF476F', '#FFD166', '#06D6A0', '#4CC9F0'];
         for (let c = 0; c < 4; c++) {
@@ -848,7 +849,6 @@ export default function App() {
         const dy = w.y - proj.y;
         const dist = Math.hypot(dx, dy);
 
-        // Check Direct Hit Knockout Launch Mode!
         const isDirectHitOnWorm =
           proj.directHitWormId === w.id || dist <= Math.max(24, blastR * 0.58);
 
@@ -1077,6 +1077,7 @@ export default function App() {
           st.charging = true;
           st.power = 12;
           st.powerDirection = 1;
+          st.turnSpotlightTimer = 0;
           setIsCharging(true);
         }
       }
@@ -1180,7 +1181,7 @@ export default function App() {
       const activeWorm = st.worms.find((w) => w.id === st.activeWormId && w.isAlive);
       const currentTeam = teams[st.activeTeamIdx];
 
-      // 1. Handle Human Input (Keyboard + Touch Hold) or Bot AI during MOVE_AND_AIM
+      // 1. Handle Human Input (Keyboard + Virtual Joystick) or Bot AI during MOVE_AND_AIM
       if (
         !isTitleScreenOpen &&
         st.phase === 'MOVE_AND_AIM' &&
@@ -1188,16 +1189,34 @@ export default function App() {
         !victoryTeam
       ) {
         if (!currentTeam?.isBot) {
+          const joy = st.joystickVector;
           const moveLeft =
-            st.keys['ArrowLeft'] || st.keys['KeyA'] || st.touchMoveDir === -1;
+            st.keys['ArrowLeft'] ||
+            st.keys['KeyA'] ||
+            st.touchMoveDir === -1 ||
+            (joy.active && joy.x < -0.32);
           const moveRight =
-            st.keys['ArrowRight'] || st.keys['KeyD'] || st.touchMoveDir === 1;
+            st.keys['ArrowRight'] ||
+            st.keys['KeyD'] ||
+            st.touchMoveDir === 1 ||
+            (joy.active && joy.x > 0.32);
           const aimUp =
             st.keys['ArrowUp'] ||
             (gameplayMode === 'CLASSIC_V1' && st.keys['KeyW']) ||
-            st.touchAimDir === -1;
+            st.touchAimDir === -1 ||
+            (joy.active && joy.y < -0.25);
           const aimDown =
-            st.keys['ArrowDown'] || st.keys['KeyS'] || st.touchAimDir === 1;
+            st.keys['ArrowDown'] ||
+            st.keys['KeyS'] ||
+            st.touchAimDir === 1 ||
+            (joy.active && joy.y > 0.25);
+
+          // If player moves or aims manually, finish the turn spotlight zoom immediately so they see the full field
+          if (moveLeft || moveRight || aimUp || aimDown || st.charging) {
+            if (st.turnSpotlightTimer > 18) {
+              st.turnSpotlightTimer = 18;
+            }
+          }
 
           if (gameplayMode === 'CLASSIC_V1') {
             if (moveLeft) {
@@ -1244,7 +1263,8 @@ export default function App() {
               mouseAimEnabled &&
               st.mouseCanvasPos &&
               !moveLeft &&
-              !moveRight
+              !moveRight &&
+              !joy.active
             ) {
               const dx = st.mouseCanvasPos.x - activeWorm.x;
               const dy = st.mouseCanvasPos.y - (activeWorm.y - 4);
@@ -1306,15 +1326,13 @@ export default function App() {
       st.worms.forEach((w) => {
         if (!w.isAlive) return;
 
-        // Special Out-of-Stage Launch Animation when hit in Direct-Hit KO mode!
         if (w.isLaunchingOut) {
           anyWormLaunching = true;
           w.x += w.vx;
           w.y += w.vy;
-          w.vy += 0.22; // Slight arc while blasting out of the stage
+          w.vy += 0.22;
           w.launchSpin = (w.launchSpin || 0.1) + (w.vx >= 0 ? 0.44 : -0.44);
 
-          // Spawn continuous comet trail of stars and chalk sparks behind the flying worm
           if (st.tick % 2 === 0) {
             const colors = ['#FFD166', '#00F5D4', '#EF476F', '#FFFFFF'];
             for (let k = 0; k < 2; k++) {
@@ -1332,7 +1350,6 @@ export default function App() {
             }
           }
 
-          // Check if worm has exited the arena boundaries -> Trigger Star K.O. Edge Burst!
           if (
             w.x < -35 ||
             w.x > CANVAS_W + 35 ||
@@ -1686,30 +1703,41 @@ export default function App() {
         setTeamHpSummary(summary);
       }
 
-      // Update Smooth Camera Tracking (for mobile & small viewports or when Smart Zoom is active)
-      const targetZoom = smartCameraZoom ? 1.55 : 1.0;
-      st.cameraZoom += (targetZoom - st.cameraZoom) * 0.14;
+      // ====================================================================
+      // TURN SPOTLIGHT CAMERA CHOREOGRAPHY:
+      // Zooms in on the active player at the start of the turn to highlight
+      // whose turn it is, then rapidly returns to the 1.0x Wide Overview!
+      // ====================================================================
+      if (!isTitleScreenOpen && st.turnSpotlightTimer > 0) {
+        st.turnSpotlightTimer--;
+      }
 
-      const launchingWorm = st.worms.find((w) => w.isAlive && w.isLaunchingOut);
-      const leadProjectile = st.projectiles[0];
-      const focusTarget = launchingWorm || leadProjectile || activeWorm;
-
-      if (focusTarget && st.cameraZoom > 1.02) {
+      if (st.turnSpotlightTimer > 24 && activeWorm) {
+        // Phase A: Smooth Zoom-In on the Active Worm (2.15x)
+        const targetZoom = 2.15;
+        st.cameraZoom += (targetZoom - st.cameraZoom) * 0.16;
         const halfViewW = CANVAS_W / (2 * st.cameraZoom);
         const halfViewH = CANVAS_H / (2 * st.cameraZoom);
-        const clampedTargetX = Math.max(
+        const targetX = Math.max(
           halfViewW,
-          Math.min(CANVAS_W - halfViewW, focusTarget.x)
+          Math.min(CANVAS_W - halfViewW, activeWorm.x)
         );
-        const clampedTargetY = Math.max(
+        const targetY = Math.max(
           halfViewH,
-          Math.min(CANVAS_H - halfViewH, focusTarget.y)
+          Math.min(CANVAS_H - halfViewH, activeWorm.y - 12)
         );
-        st.cameraX += (clampedTargetX - st.cameraX) * 0.15;
-        st.cameraY += (clampedTargetY - st.cameraY) * 0.15;
+        st.cameraX += (targetX - st.cameraX) * 0.22;
+        st.cameraY += (targetY - st.cameraY) * 0.22;
       } else {
-        st.cameraX += (CANVAS_W / 2 - st.cameraX) * 0.2;
-        st.cameraY += (CANVAS_H / 2 - st.cameraY) * 0.2;
+        // Phase B: Rapidly return to Wide Shot (Plano Geral 1.0x) so all opponents are visible!
+        st.cameraZoom += (1.0 - st.cameraZoom) * 0.22;
+        st.cameraX += (CANVAS_W / 2 - st.cameraX) * 0.24;
+        st.cameraY += (CANVAS_H / 2 - st.cameraY) * 0.24;
+        if (Math.abs(st.cameraZoom - 1.0) < 0.01) {
+          st.cameraZoom = 1.0;
+          st.cameraX = CANVAS_W / 2;
+          st.cameraY = CANVAS_H / 2;
+        }
       }
 
       // ====================================================================
@@ -1722,8 +1750,8 @@ export default function App() {
 
         ctx.save();
 
-        // Apply Smart Camera Zoom & Pan
-        if (st.cameraZoom > 1.01) {
+        // Apply Turn Spotlight Camera Zoom & Pan
+        if (st.cameraZoom > 1.005) {
           ctx.translate(CANVAS_W / 2, CANVAS_H / 2);
           ctx.scale(st.cameraZoom, st.cameraZoom);
           ctx.translate(-st.cameraX, -st.cameraY);
@@ -1859,6 +1887,23 @@ export default function App() {
           if (!w.isAlive) return;
           const isTurn = w.id === st.activeWormId && !w.isLaunchingOut;
           const team = teams[w.teamId] || teams[0];
+
+          // Turn Spotlight Halo Ring when camera zooms in at turn start
+          if (isTurn && st.turnSpotlightTimer > 15) {
+            ctx.save();
+            ctx.strokeStyle = '#FFD166';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(
+              Math.round(w.x),
+              Math.round(w.y - 4),
+              22 + Math.sin(st.tick * 0.25) * 4,
+              0,
+              Math.PI * 2
+            );
+            ctx.stroke();
+            ctx.restore();
+          }
 
           drawPixelWorm(
             ctx,
@@ -2000,7 +2045,6 @@ export default function App() {
     isTitleScreenOpen,
     gameplayMode,
     instantKODirectHit,
-    smartCameraZoom,
     teams,
     activeTeamCount,
     selectedBiomeId,
@@ -2019,7 +2063,7 @@ export default function App() {
     SPELL_ARSENAL.find((w) => w.id === selectedWeaponId) || SPELL_ARSENAL[0];
   const currentTeam = teams[activeTeamIndex] || teams[0];
 
-  // Convert client screen coordinates to internal 1280x720 world coordinates (accounting for camera zoom/pan)
+  // Convert client screen coordinates to internal 1280x720 world coordinates
   const clientToWorldCoords = (clientX: number, clientY: number) => {
     const canvas = displayCanvasRef.current;
     if (!canvas) return { x: CANVAS_W / 2, y: CANVAS_H / 2 };
@@ -2058,6 +2102,7 @@ export default function App() {
       st.charging = true;
       st.power = 15;
       st.powerDirection = 1;
+      st.turnSpotlightTimer = 0;
       setIsCharging(true);
     }
   };
@@ -2069,7 +2114,7 @@ export default function App() {
     }
   };
 
-  // Touch Aiming directly on the Battlefield Canvas for mobile users
+  // Touch Aiming directly on the Battlefield Canvas
   const handleCanvasTouchStart = (e: React.TouchEvent<HTMLCanvasElement>) => {
     if (e.touches.length === 0) return;
     const st = engineRef.current;
@@ -2102,12 +2147,41 @@ export default function App() {
     activeWorm.aimAngle = Math.max(-1.42, Math.min(0.85, Math.atan2(dy, Math.abs(dx))));
   };
 
+  // Virtual Translucent Analog Joystick Handlers for Mobile/Touch
+  const updateJoystickFromPoint = (clientX: number, clientY: number) => {
+    const base = joystickBaseRef.current;
+    if (!base) return;
+    const rect = base.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    const maxRadius = rect.width / 2 - 12;
+
+    const dx = clientX - centerX;
+    const dy = clientY - centerY;
+    const dist = Math.hypot(dx, dy);
+    const clampedDist = Math.min(maxRadius, dist);
+    const angle = Math.atan2(dy, dx);
+
+    const knobX = Math.cos(angle) * clampedDist;
+    const knobY = Math.sin(angle) * clampedDist;
+    const normX = knobX / maxRadius;
+    const normY = knobY / maxRadius;
+
+    engineRef.current.joystickVector = { x: normX, y: normY, active: true };
+    setJoystickKnob({ x: knobX, y: knobY, active: true });
+  };
+
+  const resetJoystick = () => {
+    engineRef.current.joystickVector = { x: 0, y: 0, active: false };
+    setJoystickKnob({ x: 0, y: 0, active: false });
+  };
+
   return (
     <div className="relative w-screen h-dvh overflow-hidden bg-[#0F0E17] select-none flex flex-col">
       {/* ====================================================================
-          TOP NAVIGATION BAR (3-Zone Contract, Compact on Mobile <= 7% height)
+          TOP NAVIGATION BAR (Desktop Only - Hidden on Mobile/Tablet so Canvas is 100% Fullscreen!)
          ==================================================================== */}
-      <header className="z-20 flex items-center justify-between gap-2 sm:gap-6 px-3 sm:px-5 py-1.5 sm:py-2.5 bg-[#161426]/95 border-b-2 border-[#3D3859]">
+      <header className="hidden lg:flex z-20 items-center justify-between gap-6 px-5 py-2.5 bg-[#161426]/95 border-b-2 border-[#3D3859]">
         {/* Zone 1: Brand Title */}
         <a
           href="#top"
@@ -2115,13 +2189,13 @@ export default function App() {
             e.preventDefault();
             setIsTitleScreenOpen(true);
           }}
-          className="font-pixel text-[10px] sm:text-xs md:text-sm text-[#FFD166] tracking-tight whitespace-nowrap shrink-0"
+          className="font-pixel text-xs md:text-sm text-[#FFD166] tracking-tight whitespace-nowrap shrink-0"
         >
           GRIMÓRIO DE GIZ
         </a>
 
-        {/* Zone 2: Concise Single-Line Action Links (Scrollable on narrow mobile) */}
-        <nav className="flex items-center gap-3 sm:gap-5 text-[11px] sm:text-xs font-medium text-[#A7A9BE] overflow-x-auto no-scrollbar py-0.5">
+        {/* Zone 2: Concise Single-Line Action Links */}
+        <nav className="flex items-center gap-5 text-xs font-medium text-[#A7A9BE] overflow-x-auto no-scrollbar py-0.5">
           <button
             onClick={() => setIsTitleScreenOpen(true)}
             className="hover:text-[#FFD166] transition-colors flex items-center gap-1 whitespace-nowrap shrink-0"
@@ -2165,11 +2239,10 @@ export default function App() {
         <div className="flex items-center shrink-0">
           <button
             onClick={advanceTurn}
-            className="pixel-btn min-h-[36px] sm:min-h-[38px] bg-[#EF476F] hover:bg-[#D93860] px-2.5 sm:px-3.5 py-1 text-[11px] sm:text-xs font-bold text-[#F4F1DE] border-[#EF476F] flex items-center gap-1 whitespace-nowrap shrink-0"
+            className="pixel-btn min-h-[38px] bg-[#EF476F] hover:bg-[#D93860] px-3.5 py-1 text-xs font-bold text-[#F4F1DE] border-[#EF476F] flex items-center gap-1.5 whitespace-nowrap shrink-0"
           >
             <SkipForward className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Passar Turno</span>
-            <span className="sm:hidden">Turno</span>
+            Passar Turno
           </button>
         </div>
       </header>
@@ -2187,27 +2260,101 @@ export default function App() {
           onMouseUp={handleCanvasMouseUp}
           onTouchStart={handleCanvasTouchStart}
           onTouchMove={handleCanvasTouchMove}
-          className="pixelated w-full h-full object-cover md:object-fill cursor-crosshair touch-none"
+          className="pixelated w-full h-full object-fill cursor-crosshair touch-none"
         />
 
-        {/* Top-Left HUD: Turn Timer, Active Team & Smart Camera Toggle */}
-        <div className="pointer-events-none absolute top-2 sm:top-3 left-2 sm:left-4 flex items-center gap-2 sm:gap-3">
-          <div className="pixel-panel px-2.5 sm:px-3.5 py-1.5 sm:py-2 flex items-center gap-2.5 sm:gap-3">
+        {/* ==================================================================
+            TRANSLUCENT TOP BAR OVERLAY FOR MOBILE / LANDSCAPE (< 1024px)
+           ================================================================== */}
+        <div className="lg:hidden absolute top-2 left-3 right-3 z-20 flex items-center justify-between gap-2 pointer-events-none">
+          {/* Left: Translucent Timer + Active Team + Spotlight Replay button */}
+          <div className="pointer-events-auto flex items-center gap-2 bg-black/35 backdrop-blur-[2px] border border-white/20 rounded-full px-3 py-1">
+            <span
+              className="font-mono-num text-sm font-bold"
+              style={{ color: turnTimer <= 8 ? '#EF476F' : '#FFD166' }}
+            >
+              {String(turnTimer).padStart(2, '0')}s
+            </span>
+            <span className="text-white/30">·</span>
+            <button
+              onClick={() => {
+                // Re-trigger quick spotlight zoom on active worm if tapped!
+                engineRef.current.turnSpotlightTimer = SPOTLIGHT_TOTAL_FRAMES;
+              }}
+              className="font-silk text-[11px] font-bold truncate max-w-[110px]"
+              style={{ color: currentTeam?.color }}
+              title="Tocar para focar no jogador da vez"
+            >
+              {currentTeam?.name}
+            </button>
+          </div>
+
+          {/* Center: Translucent Wind Pill */}
+          <div className="pointer-events-none flex items-center gap-1.5 bg-black/35 backdrop-blur-[2px] border border-white/20 rounded-full px-3 py-1 text-[11px] font-mono-num">
+            <Wind className="w-3.5 h-3.5 text-[#4CC9F0]" />
+            <span
+              className="font-bold"
+              style={{
+                color:
+                  hudWeather.currentWindX > 0.3
+                    ? '#06D6A0'
+                    : hudWeather.currentWindX < -0.3
+                    ? '#EF476F'
+                    : '#FFD166',
+              }}
+            >
+              {hudWeather.currentWindX > 0
+                ? `→ +${hudWeather.currentWindX}`
+                : `← ${hudWeather.currentWindX}`}
+            </span>
+          </div>
+
+          {/* Right: Compact Translucent Utility Icons */}
+          <div className="pointer-events-auto flex items-center gap-1.5">
+            <button
+              onClick={() => setIsTitleScreenOpen(true)}
+              className="h-8 px-2.5 rounded-full bg-black/35 backdrop-blur-[2px] border border-white/20 text-[10px] font-semibold text-[#FFD166] flex items-center gap-1"
+            >
+              <Layers className="w-3 h-3" />
+              Modo
+            </button>
+            <button
+              onClick={() => setIsWardrobeOpen(true)}
+              className="h-8 w-8 rounded-full bg-black/35 backdrop-blur-[2px] border border-white/20 text-[#06D6A0] flex items-center justify-center"
+              title="Configurações & Equipes"
+            >
+              <Palette className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={advanceTurn}
+              className="h-8 px-2.5 rounded-full bg-[#EF476F]/65 backdrop-blur-[2px] border border-[#EF476F] text-[10px] font-bold text-white flex items-center gap-1"
+            >
+              <SkipForward className="w-3 h-3" />
+              Turno
+            </button>
+          </div>
+        </div>
+
+        {/* ==================================================================
+            DESKTOP TOP HUD (Hidden on Mobile so screen stays clean)
+           ================================================================== */}
+        <div className="hidden lg:flex pointer-events-none absolute top-3 left-4 items-center gap-3">
+          <div className="pixel-panel px-3.5 py-2 flex items-center gap-3">
             <div
-              className="font-mono-num text-base sm:text-xl md:text-2xl font-bold"
+              className="font-mono-num text-2xl font-bold"
               style={{ color: turnTimer <= 8 ? '#EF476F' : '#FFD166' }}
             >
               {String(turnTimer).padStart(2, '0')}s
             </div>
-            <div className="border-l border-[#3D3859] pl-2.5 sm:pl-3">
-              <div className="text-[9px] sm:text-[10px] font-mono-num text-[#A7A9BE]">
+            <div className="border-l border-[#3D3859] pl-3">
+              <div className="text-[10px] font-mono-num text-[#A7A9BE]">
                 {instantKODirectHit ? 'K.O. DIRETO · ' : ''}
                 {gameplayMode === 'CLASSIC_V1'
                   ? '1ª VERSÃO'
                   : `ENERGIA ${activeStamina}%`}
               </div>
               <div
-                className="font-silk text-[11px] sm:text-xs font-bold truncate max-w-[115px] sm:max-w-[180px]"
+                className="font-silk text-xs font-bold truncate max-w-[180px]"
                 style={{ color: currentTeam?.color }}
               >
                 {currentTeam?.name}
@@ -2215,26 +2362,6 @@ export default function App() {
             </div>
           </div>
 
-          {/* Camera Zoom Toggle (Especially helpful on Mobile & Small Screens!) */}
-          <button
-            onClick={() => setSmartCameraZoom((v) => !v)}
-            className="pointer-events-auto pixel-btn min-h-[40px] bg-[#1A1829]/95 px-2.5 py-1.5 text-[11px] font-mono-num text-[#F4F1DE] hover:text-[#FFD166] flex items-center gap-1.5 whitespace-nowrap"
-            title="Alternar entre Foco Próximo na Minhoca e Visão Panorâmica do Mapa"
-          >
-            {smartCameraZoom ? (
-              <>
-                <Minimize2 className="w-3.5 h-3.5 text-[#06D6A0]" />
-                <span>Mapa Todo</span>
-              </>
-            ) : (
-              <>
-                <Maximize2 className="w-3.5 h-3.5 text-[#FFD166]" />
-                <span>Zoom Foco</span>
-              </>
-            )}
-          </button>
-
-          {/* Desktop Team Health Ledger */}
           <div className="hidden xl:flex items-center gap-2">
             {teams.slice(0, activeTeamCount).map((t, idx) => {
               const stat = teamHpSummary.find((s) => s.id === t.id);
@@ -2258,13 +2385,12 @@ export default function App() {
           </div>
         </div>
 
-        {/* Top-Right HUD: Wind Indicator & Sound */}
-        <div className="absolute top-2 sm:top-3 right-2 sm:right-4 flex items-center gap-1.5 sm:gap-2">
-          <div className="pixel-panel px-2.5 sm:px-3.5 py-1.5 sm:py-2 flex items-center gap-2 text-[11px] sm:text-xs font-mono-num">
-            <Wind className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-[#4CC9F0] shrink-0" />
+        <div className="hidden lg:flex absolute top-3 right-4 items-center gap-2">
+          <div className="pixel-panel px-3.5 py-2 flex items-center gap-3 text-xs font-mono-num">
+            <Wind className="w-4 h-4 text-[#4CC9F0] shrink-0" />
             <div>
-              <div className="flex items-center gap-1.5">
-                <span className="hidden sm:inline font-silk text-[11px] font-bold text-[#F4F1DE]">
+              <div className="flex items-center gap-2">
+                <span className="font-silk text-[11px] font-bold text-[#F4F1DE]">
                   {hudWeather.name.toUpperCase()} ·
                 </span>
                 <span
@@ -2284,7 +2410,7 @@ export default function App() {
                 </span>
               </div>
               {gameplayMode === 'MODERN_V2' && (
-                <div className="hidden sm:block mt-1 h-1.5 w-32 bg-[#09080E] border border-[#3D3859] relative overflow-hidden">
+                <div className="mt-1 h-1.5 w-32 bg-[#09080E] border border-[#3D3859] relative overflow-hidden">
                   <div className="absolute left-1/2 top-0 bottom-0 w-0.5 bg-[#F4F1DE]/50" />
                   <div
                     className="h-full transition-all duration-100"
@@ -2320,7 +2446,7 @@ export default function App() {
 
         {/* Level Up Celebration Toast */}
         {levelUpBanner && (
-          <div className="pointer-events-none absolute top-14 sm:top-16 left-1/2 -translate-x-1/2 z-30 pixel-panel border-[#FFD166] bg-[#241B35] px-4 sm:px-6 py-2.5 sm:py-3 text-center animate-bounce w-[90vw] max-w-md">
+          <div className="pointer-events-none absolute top-14 sm:top-16 left-1/2 -translate-x-1/2 z-30 pixel-panel border-[#FFD166] bg-[#241B35] px-4 sm:px-6 py-2.5 text-center animate-bounce w-[90vw] max-w-md">
             <div className="font-pixel text-xs text-[#FFD166]">
               SUBIU PARA O NÍVEL {levelUpBanner.level}!
             </div>
@@ -2331,50 +2457,179 @@ export default function App() {
         )}
 
         {/* ====================================================================
-            BOTTOM ERGONOMIC CONTROL DOCK (Mobile Thumb-Zone & Desktop Adaptive)
+            MOBILE / TABLET TRANSLUCENT JOYSTICK & ARCADE BUTTONS (< 1024px)
+            Zero opaque boxes — clean translucent controls in bottom corners!
            ==================================================================== */}
-        <div className="absolute bottom-2 sm:bottom-3 left-2 sm:left-4 right-2 sm:right-4 flex flex-col lg:flex-row items-stretch lg:items-end justify-between gap-2 sm:gap-3 pointer-events-none">
-          {/* Left on Desktop / Top compact strip on Mobile: Equipped Spell Card */}
-          <div className="pointer-events-auto pixel-panel px-3 py-2 sm:p-3 flex items-center justify-between gap-2.5">
-            <div className="flex items-center gap-2.5 min-w-0">
+        <div className="lg:hidden pointer-events-none absolute inset-x-0 bottom-0 p-3 flex items-end justify-between z-20">
+          {/* Bottom-Left: Translucent Virtual Thumbstick (Walk Left/Right + Aim Up/Down) */}
+          <div className="pointer-events-auto flex items-end gap-3">
+            <div
+              ref={joystickBaseRef}
+              onPointerDown={(e) => {
+                e.currentTarget.setPointerCapture(e.pointerId);
+                updateJoystickFromPoint(e.clientX, e.clientY);
+              }}
+              onPointerMove={(e) => {
+                if (joystickKnob.active) {
+                  updateJoystickFromPoint(e.clientX, e.clientY);
+                }
+              }}
+              onPointerUp={resetJoystick}
+              onPointerCancel={resetJoystick}
+              className="relative w-24 h-24 sm:w-28 sm:h-28 rounded-full bg-white/10 backdrop-blur-[2px] border-2 border-white/25 flex items-center justify-center touch-none shadow-lg"
+            >
+              {/* Crosshair Axis Guides inside Joystick */}
+              <div className="pointer-events-none absolute inset-x-3 h-px bg-white/15" />
+              <div className="pointer-events-none absolute inset-y-3 w-px bg-white/15" />
+              <span className="pointer-events-none absolute top-1.5 text-[9px] font-mono-num text-white/50">
+                MIRA
+              </span>
+              <span className="pointer-events-none absolute bottom-1.5 text-[9px] font-mono-num text-white/50">
+                ANDAR
+              </span>
+
+              {/* Movable Translucent Thumb Knob */}
               <div
-                className="w-8 h-8 sm:w-10 sm:h-10 shrink-0 border-2 border-[#F4F1DE]/40 flex items-center justify-center font-pixel text-[10px] sm:text-xs"
+                className="pointer-events-none w-10 h-10 rounded-full bg-[#FFD166]/65 border-2 border-white shadow-md transition-transform duration-75"
+                style={{
+                  transform: `translate(${joystickKnob.x}px, ${joystickKnob.y}px)`,
+                }}
+              />
+            </div>
+          </div>
+
+          {/* Center Floating Translucent Power Gauge (Only visible while charging!) */}
+          {isCharging && (
+            <div className="pointer-events-none mb-6 flex flex-col items-center">
+              <div className="px-3 py-1 rounded-full bg-black/55 backdrop-blur-sm border border-white/20 text-xs font-mono-num font-bold text-[#FFD166]">
+                {gameplayMode === 'MODERN_V2' &&
+                chargePower >= 86 &&
+                chargePower <= 96
+                  ? `${chargePower}% CRÍTICO!`
+                  : `${chargePower}%`}
+              </div>
+            </div>
+          )}
+
+          {/* Bottom-Right: Translucent Circular Arcade Action Cluster */}
+          <div className="pointer-events-auto flex items-end gap-2.5 sm:gap-3">
+            {/* Spell / Grimório Circular Button */}
+            <button
+              onClick={() => setIsArsenalOpen(true)}
+              className="w-12 h-12 rounded-full bg-[#9B5DE5]/35 active:bg-[#9B5DE5]/70 backdrop-blur-[2px] border-2 border-white/35 flex flex-col items-center justify-center text-white shadow-lg"
+              title="Escolher Magia"
+            >
+              <span className="text-sm leading-none">
+                {renderWeaponPixelIcon(currentWeapon.id)}
+              </span>
+              <span className="text-[8px] font-mono-num font-bold text-[#FFD166] mt-0.5">
+                MAGIA
+              </span>
+            </button>
+
+            {/* Acrobatic Flip Button (Modern V2) */}
+            {gameplayMode === 'MODERN_V2' && (
+              <button
+                onClick={performAcrobaticDash}
+                disabled={turnPhase !== 'MOVE_AND_AIM' || currentTeam?.isBot}
+                className="w-12 h-12 rounded-full bg-[#4CC9F0]/30 active:bg-[#4CC9F0]/65 backdrop-blur-[2px] border-2 border-[#4CC9F0]/70 flex flex-col items-center justify-center text-white shadow-lg"
+              >
+                <Zap className="w-4 h-4 text-[#4CC9F0]" />
+                <span className="text-[8px] font-mono-num font-bold mt-0.5">
+                  MORTAL
+                </span>
+              </button>
+            )}
+
+            {/* Jump / Double Jump Circular Button */}
+            <button
+              onClick={performJump}
+              disabled={turnPhase !== 'MOVE_AND_AIM' || currentTeam?.isBot}
+              className="w-13 h-13 rounded-full bg-[#06D6A0]/30 active:bg-[#06D6A0]/65 backdrop-blur-[2px] border-2 border-[#06D6A0]/75 flex flex-col items-center justify-center text-white shadow-lg"
+            >
+              <Sparkles className="w-4 h-4 text-[#06D6A0]" />
+              <span className="text-[9px] font-mono-num font-bold mt-0.5">
+                {gameplayMode === 'CLASSIC_V1' ? 'PULO' : 'PULO 2X'}
+              </span>
+            </button>
+
+            {/* Primary Large Translucent Hold-to-Fire Button */}
+            <button
+              disabled={turnPhase !== 'MOVE_AND_AIM' || currentTeam?.isBot}
+              onPointerDown={(e) => {
+                e.preventDefault();
+                const st = engineRef.current;
+                if (st.phase === 'MOVE_AND_AIM' && !currentTeam?.isBot) {
+                  st.charging = true;
+                  st.power = 15;
+                  st.powerDirection = 1;
+                  st.turnSpotlightTimer = 0;
+                  setIsCharging(true);
+                }
+              }}
+              onPointerUp={(e) => {
+                e.preventDefault();
+                const st = engineRef.current;
+                if (st.charging) {
+                  fireSelectedWeapon(Math.max(20, st.power));
+                }
+              }}
+              onPointerCancel={() => {
+                const st = engineRef.current;
+                if (st.charging) {
+                  fireSelectedWeapon(Math.max(20, st.power));
+                }
+              }}
+              className="relative w-16 h-16 sm:w-18 sm:h-18 rounded-full bg-[#EF476F]/45 active:bg-[#EF476F]/80 backdrop-blur-[2px] border-2 border-[#FFD166] flex flex-col items-center justify-center text-white shadow-xl touch-none"
+            >
+              <Flame className="w-5 h-5 text-[#FFD166]" />
+              <span className="text-[9px] font-mono-num font-bold tracking-tight mt-0.5">
+                ATIRAR
+              </span>
+            </button>
+          </div>
+        </div>
+
+        {/* ====================================================================
+            DESKTOP BOTTOM DOCK (Only visible on Desktop >= 1024px)
+           ==================================================================== */}
+        <div className="hidden lg:flex absolute bottom-3 left-4 right-4 items-end justify-between gap-3 pointer-events-none">
+          {/* Left: Equipped Spell Card */}
+          <div className="pointer-events-auto pixel-panel p-3 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <div
+                className="w-10 h-10 shrink-0 border-2 border-[#F4F1DE]/40 flex items-center justify-center font-pixel text-xs"
                 style={{
                   background: `linear-gradient(135deg, ${currentWeapon.color} 50%, ${currentWeapon.secondaryColor} 50%)`,
                 }}
               >
                 NV{currentWeapon.unlockLevel}
               </div>
-              <div className="min-w-0">
-                <div className="text-[9px] sm:text-[10px] font-mono-num text-[#A7A9BE] truncate">
+              <div>
+                <div className="text-[10px] font-mono-num text-[#A7A9BE]">
                   DANO {currentWeapon.damage > 0 ? currentWeapon.damage : 'TP'} ·{' '}
                   {instantKODirectHit ? 'K.O. DIRETO ATIVO' : `RAIO ${currentWeapon.blastRadius}px`}
                 </div>
-                <div className="font-silk text-xs font-bold text-[#FFD166] truncate">
+                <div className="font-silk text-xs font-bold text-[#FFD166]">
                   {currentWeapon.name}
                 </div>
               </div>
             </div>
             <button
               onClick={() => setIsArsenalOpen(true)}
-              className="pixel-btn min-h-[42px] bg-[#2C2747] hover:bg-[#3B345E] px-3 py-1.5 text-xs font-semibold text-[#F4F1DE] border-[#FFD166] whitespace-nowrap shrink-0"
+              className="pixel-btn min-h-[40px] bg-[#2C2747] hover:bg-[#3B345E] px-3 py-1.5 text-xs font-semibold text-[#F4F1DE] border-[#FFD166] whitespace-nowrap shrink-0"
             >
               Magias (E)
             </button>
           </div>
 
-          {/* Center: Power Charge Bar & Continuous Hold Touch D-Pad + Fire CTA */}
-          <div className="pointer-events-auto pixel-panel p-2.5 sm:p-3 flex flex-col gap-2 flex-1 max-w-2xl">
-            <div className="flex items-center justify-between text-[10px] sm:text-[11px] font-mono-num gap-2">
-              <span className="text-[#A7A9BE] truncate">
-                <span className="hidden sm:inline">
-                  {gameplayMode === 'CLASSIC_V1'
-                    ? '1ª Versão: A/D Andar · W/S Mirar · Enter Pular · Espaço Força'
-                    : '2ª Versão: Toque/Mouse Mira · A/D Andar · W Pulo Duplo · Q Mortal'}
-                </span>
-                <span className="sm:hidden">
-                  Toque no mapa para mirar · Segure botões abaixo
-                </span>
+          {/* Center: Desktop Power Bar & Controls */}
+          <div className="pointer-events-auto pixel-panel p-3 flex flex-col gap-2 flex-1 max-w-xl">
+            <div className="flex items-center justify-between text-[11px] font-mono-num gap-2">
+              <span className="text-[#A7A9BE]">
+                {gameplayMode === 'CLASSIC_V1'
+                  ? '1ª Versão: A/D Andar · W/S Mirar · Enter Pular · Espaço Força'
+                  : '2ª Versão: Mouse Mira/Atira · A/D Andar · W Pulo Duplo · Q Mortal'}
               </span>
               <span
                 className="font-bold shrink-0"
@@ -2394,12 +2649,11 @@ export default function App() {
                     chargePower <= 96
                     ? `${chargePower}% CRÍTICO!`
                     : `FORÇA: ${chargePower}%`
-                  : 'SEGURE DISPARO'}
+                  : 'SEGURE ESPAÇO OU CLIQUE'}
               </span>
             </div>
 
-            {/* Power Progress Bar */}
-            <div className="relative h-2.5 sm:h-3 w-full bg-[#09080E] border border-[#3D3859] overflow-hidden">
+            <div className="relative h-3 w-full bg-[#09080E] border border-[#3D3859] overflow-hidden">
               {gameplayMode === 'MODERN_V2' && (
                 <div
                   className="absolute top-0 bottom-0 bg-[#00F5D4]/30 border-x border-[#00F5D4]"
@@ -2412,149 +2666,9 @@ export default function App() {
                 style={{ width: `${isCharging ? chargePower : 0}%` }}
               />
             </div>
-
-            {/* Ergonomic Thumb-Zone Buttons (All >= 44px touch targets on mobile, support continuous hold!) */}
-            <div className="flex items-center justify-between gap-1.5 sm:gap-2 pt-0.5">
-              <div className="flex items-center gap-1 sm:gap-1.5 flex-wrap">
-                {/* Walk Left (Holdable) */}
-                <button
-                  disabled={turnPhase !== 'MOVE_AND_AIM' || currentTeam?.isBot}
-                  onPointerDown={() => {
-                    engineRef.current.touchMoveDir = -1;
-                  }}
-                  onPointerUp={() => {
-                    engineRef.current.touchMoveDir = 0;
-                  }}
-                  onPointerLeave={() => {
-                    engineRef.current.touchMoveDir = 0;
-                  }}
-                  onPointerCancel={() => {
-                    engineRef.current.touchMoveDir = 0;
-                  }}
-                  className="pixel-btn min-h-[44px] min-w-[44px] bg-[#1F1D30] active:bg-[#322F4B] px-2.5 py-1.5 text-xs font-mono-num text-[#F4F1DE] whitespace-nowrap"
-                >
-                  ◀
-                </button>
-
-                {/* Walk Right (Holdable) */}
-                <button
-                  disabled={turnPhase !== 'MOVE_AND_AIM' || currentTeam?.isBot}
-                  onPointerDown={() => {
-                    engineRef.current.touchMoveDir = 1;
-                  }}
-                  onPointerUp={() => {
-                    engineRef.current.touchMoveDir = 0;
-                  }}
-                  onPointerLeave={() => {
-                    engineRef.current.touchMoveDir = 0;
-                  }}
-                  onPointerCancel={() => {
-                    engineRef.current.touchMoveDir = 0;
-                  }}
-                  className="pixel-btn min-h-[44px] min-w-[44px] bg-[#1F1D30] active:bg-[#322F4B] px-2.5 py-1.5 text-xs font-mono-num text-[#F4F1DE] whitespace-nowrap"
-                >
-                  ▶
-                </button>
-
-                {/* Aim Up (Holdable) */}
-                <button
-                  disabled={turnPhase !== 'MOVE_AND_AIM' || currentTeam?.isBot}
-                  onPointerDown={() => {
-                    engineRef.current.touchAimDir = -1;
-                  }}
-                  onPointerUp={() => {
-                    engineRef.current.touchAimDir = 0;
-                  }}
-                  onPointerLeave={() => {
-                    engineRef.current.touchAimDir = 0;
-                  }}
-                  onPointerCancel={() => {
-                    engineRef.current.touchAimDir = 0;
-                  }}
-                  className="pixel-btn min-h-[44px] min-w-[44px] bg-[#1F1D30] active:bg-[#322F4B] px-2.5 py-1.5 text-xs font-mono-num text-[#F4F1DE] whitespace-nowrap"
-                  title="Subir Mira"
-                >
-                  ▲
-                </button>
-
-                {/* Aim Down (Holdable) */}
-                <button
-                  disabled={turnPhase !== 'MOVE_AND_AIM' || currentTeam?.isBot}
-                  onPointerDown={() => {
-                    engineRef.current.touchAimDir = 1;
-                  }}
-                  onPointerUp={() => {
-                    engineRef.current.touchAimDir = 0;
-                  }}
-                  onPointerLeave={() => {
-                    engineRef.current.touchAimDir = 0;
-                  }}
-                  onPointerCancel={() => {
-                    engineRef.current.touchAimDir = 0;
-                  }}
-                  className="pixel-btn min-h-[44px] min-w-[44px] bg-[#1F1D30] active:bg-[#322F4B] px-2.5 py-1.5 text-xs font-mono-num text-[#F4F1DE] whitespace-nowrap"
-                  title="Descer Mira"
-                >
-                  ▼
-                </button>
-
-                {/* Jump / Double Jump */}
-                <button
-                  onClick={performJump}
-                  disabled={turnPhase !== 'MOVE_AND_AIM' || currentTeam?.isBot}
-                  className="pixel-btn min-h-[44px] bg-[#1F1D30] hover:bg-[#2C2942] px-2.5 sm:px-3 py-1.5 text-xs font-mono-num text-[#06D6A0] whitespace-nowrap"
-                >
-                  {gameplayMode === 'CLASSIC_V1' ? 'Pular' : 'Pulo 2x'}
-                </button>
-
-                {/* Acrobatic Backflip in Modern V2 */}
-                {gameplayMode === 'MODERN_V2' && (
-                  <button
-                    onClick={performAcrobaticDash}
-                    disabled={turnPhase !== 'MOVE_AND_AIM' || currentTeam?.isBot}
-                    className="pixel-btn min-h-[44px] bg-[#1F1D30] hover:bg-[#2C2942] px-2.5 py-1.5 text-xs font-mono-num text-[#4CC9F0] flex items-center gap-1 whitespace-nowrap"
-                  >
-                    <Zap className="w-3.5 h-3.5" />
-                    <span className="hidden sm:inline">Mortal</span>
-                  </button>
-                )}
-              </div>
-
-              {/* Primary Hold-to-Fire Action Button */}
-              <button
-                disabled={turnPhase !== 'MOVE_AND_AIM' || currentTeam?.isBot}
-                onPointerDown={(e) => {
-                  e.preventDefault();
-                  const st = engineRef.current;
-                  if (st.phase === 'MOVE_AND_AIM' && !currentTeam?.isBot) {
-                    st.charging = true;
-                    st.power = 15;
-                    st.powerDirection = 1;
-                    setIsCharging(true);
-                  }
-                }}
-                onPointerUp={(e) => {
-                  e.preventDefault();
-                  const st = engineRef.current;
-                  if (st.charging) {
-                    fireSelectedWeapon(Math.max(20, st.power));
-                  }
-                }}
-                onPointerCancel={() => {
-                  const st = engineRef.current;
-                  if (st.charging) {
-                    fireSelectedWeapon(Math.max(20, st.power));
-                  }
-                }}
-                className="pixel-btn min-h-[44px] bg-[#FFD166] hover:bg-[#FFC233] px-3.5 sm:px-5 py-2 text-xs font-bold text-[#0F0E17] border-[#FFD166] flex items-center gap-1.5 whitespace-nowrap shrink-0"
-              >
-                <Flame className="w-4 h-4 shrink-0" />
-                <span>ATIRAR</span>
-              </button>
-            </div>
           </div>
 
-          {/* Right (Desktop XL): XP & Level Progression Status Card */}
+          {/* Right: XP & Level Progression Status Card */}
           <div className="pointer-events-auto pixel-panel p-3 hidden xl:flex items-center gap-3">
             <Compass className="w-5 h-5 text-[#06D6A0] shrink-0" />
             <div>
