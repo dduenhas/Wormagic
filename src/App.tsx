@@ -7,11 +7,13 @@ import {
   Layers,
   Palette,
   RotateCcw,
+  Settings,
   SkipForward,
   Sparkles,
   Volume2,
   VolumeX,
   Wind,
+  X,
   Zap,
 } from 'lucide-react';
 import { ArsenalModal } from './components/ArsenalModal';
@@ -64,6 +66,25 @@ const TURN_TIME_SECONDS = 40;
 const SPOTLIGHT_TOTAL_FRAMES = 74; // ~1.2s zoom-in on active worm then rapid return to wide shot
 
 const STORAGE_KEY_PROGRESSION = 'grimorio_giz_progression_v1';
+const STORAGE_KEY_JOYSTICK = 'grimorio_giz_joystick_config_v1';
+
+interface JoystickConfig {
+  aimSensitivity: number; // 0.3 to 2.5 (1.0 = 100%)
+  walkSensitivity: number; // 0.4 to 2.0 (1.0 = 100%)
+  deadzone: number; // 0.08 to 0.45 (default 0.22 = 22%)
+  size: 'SM' | 'MD' | 'LG';
+  invertY: boolean;
+  touchCanvasAim: boolean;
+}
+
+const DEFAULT_JOYSTICK_CONFIG: JoystickConfig = {
+  aimSensitivity: 1.0,
+  walkSensitivity: 1.0,
+  deadzone: 0.22,
+  size: 'MD',
+  invertY: false,
+  touchCanvasAim: true,
+};
 
 const WEATHER_PRESETS: {
   id: WeatherConditionId;
@@ -182,13 +203,33 @@ export default function App() {
   // Direct-Hit Knockout Option (Default: false, keeps standard HP reduction)
   const [instantKODirectHit, setInstantKODirectHit] = useState<boolean>(false);
 
-  // Virtual Joystick visual knob state for mobile/touch overlay
+  // Virtual Joystick visual knob state & customizable sensitivity config
   const [joystickKnob, setJoystickKnob] = useState<{ x: number; y: number; active: boolean }>({
     x: 0,
     y: 0,
     active: false,
   });
   const joystickBaseRef = useRef<HTMLDivElement | null>(null);
+  const [isJoystickSettingsOpen, setIsJoystickSettingsOpen] = useState<boolean>(false);
+  const [joystickConfig, setJoystickConfig] = useState<JoystickConfig>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY_JOYSTICK);
+      if (saved) {
+        return { ...DEFAULT_JOYSTICK_CONFIG, ...JSON.parse(saved) };
+      }
+    } catch {
+      // ignore storage errors
+    }
+    return DEFAULT_JOYSTICK_CONFIG;
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY_JOYSTICK, JSON.stringify(joystickConfig));
+    } catch {
+      // ignore storage errors
+    }
+  }, [joystickConfig]);
 
   // Persistent Level & XP Progression
   const [progression, setProgression] = useState<PlayerProgression>(() => {
@@ -1122,6 +1163,7 @@ export default function App() {
         isArsenalOpen ||
         isWardrobeOpen ||
         isGodotModalOpen ||
+        isJoystickSettingsOpen ||
         victoryTeam
       )
         return;
@@ -1140,6 +1182,7 @@ export default function App() {
     isArsenalOpen,
     isWardrobeOpen,
     isGodotModalOpen,
+    isJoystickSettingsOpen,
     victoryTeam,
     advanceTurn,
   ]);
@@ -1190,26 +1233,44 @@ export default function App() {
       ) {
         if (!currentTeam?.isBot) {
           const joy = st.joystickVector;
+          const dz = joystickConfig.deadzone;
+          const joyYAdjusted = joystickConfig.invertY ? -joy.y : joy.y;
+
+          const joyMoveLeft = joy.active && joy.x < -dz;
+          const joyMoveRight = joy.active && joy.x > dz;
+          const joyAimUp = joy.active && joyYAdjusted < -dz;
+          const joyAimDown = joy.active && joyYAdjusted > dz;
+
+          // Analog intensity (0..1 above deadzone) scaled by user's sensitivity settings
+          const joyWalkIntensity = joy.active
+            ? Math.min(1.5, Math.max(0.25, (Math.abs(joy.x) - dz) / Math.max(0.1, 1 - dz))) *
+              joystickConfig.walkSensitivity
+            : 1.0;
+          const joyAimIntensity = joy.active
+            ? Math.min(1.8, Math.max(0.2, (Math.abs(joyYAdjusted) - dz) / Math.max(0.1, 1 - dz))) *
+              joystickConfig.aimSensitivity
+            : joystickConfig.aimSensitivity;
+
           const moveLeft =
             st.keys['ArrowLeft'] ||
             st.keys['KeyA'] ||
             st.touchMoveDir === -1 ||
-            (joy.active && joy.x < -0.32);
+            joyMoveLeft;
           const moveRight =
             st.keys['ArrowRight'] ||
             st.keys['KeyD'] ||
             st.touchMoveDir === 1 ||
-            (joy.active && joy.x > 0.32);
+            joyMoveRight;
           const aimUp =
             st.keys['ArrowUp'] ||
             (gameplayMode === 'CLASSIC_V1' && st.keys['KeyW']) ||
             st.touchAimDir === -1 ||
-            (joy.active && joy.y < -0.25);
+            joyAimUp;
           const aimDown =
             st.keys['ArrowDown'] ||
             st.keys['KeyS'] ||
             st.touchAimDir === 1 ||
-            (joy.active && joy.y > 0.25);
+            joyAimDown;
 
           // If player moves or aims manually, finish the turn spotlight zoom immediately so they see the full field
           if (moveLeft || moveRight || aimUp || aimDown || st.charging) {
@@ -1219,22 +1280,25 @@ export default function App() {
           }
 
           if (gameplayMode === 'CLASSIC_V1') {
+            const classicStep = 1.35 * (joy.active ? joyWalkIntensity : 1.0);
+            const classicAimStep = 0.026 * joyAimIntensity;
+
             if (moveLeft) {
               activeWorm.facing = -1;
               if (!isPixelSolid(activeWorm.x - 6, activeWorm.y - 4)) {
-                activeWorm.x = Math.max(18, activeWorm.x - 1.35);
+                activeWorm.x = Math.max(18, activeWorm.x - classicStep);
               }
             } else if (moveRight) {
               activeWorm.facing = 1;
               if (!isPixelSolid(activeWorm.x + 6, activeWorm.y - 4)) {
-                activeWorm.x = Math.min(CANVAS_W - 18, activeWorm.x + 1.35);
+                activeWorm.x = Math.min(CANVAS_W - 18, activeWorm.x + classicStep);
               }
             }
 
             if (aimUp) {
-              activeWorm.aimAngle = Math.max(-1.42, activeWorm.aimAngle - 0.026);
+              activeWorm.aimAngle = Math.max(-1.42, activeWorm.aimAngle - classicAimStep);
             } else if (aimDown) {
-              activeWorm.aimAngle = Math.min(0.85, activeWorm.aimAngle + 0.026);
+              activeWorm.aimAngle = Math.min(0.85, activeWorm.aimAngle + classicAimStep);
             }
 
             if (st.charging) {
@@ -1245,10 +1309,13 @@ export default function App() {
               }
             }
           } else {
+            const modernWalkSpeed = 0.95 * (joy.active ? joyWalkIntensity : 1.0);
+            const modernAimStep = 0.028 * joyAimIntensity;
+
             if ((moveLeft || moveRight) && activeWorm.stamina > 0) {
               const dir = moveLeft ? -1 : 1;
               activeWorm.facing = dir;
-              activeWorm.vx = activeWorm.vx * 0.65 + dir * 0.95;
+              activeWorm.vx = activeWorm.vx * 0.65 + dir * modernWalkSpeed;
               activeWorm.stamina = Math.max(0, activeWorm.stamina - 0.18);
               if (st.tick % 6 === 0) {
                 setActiveStamina(Math.round(activeWorm.stamina));
@@ -1256,9 +1323,9 @@ export default function App() {
             }
 
             if (aimUp) {
-              activeWorm.aimAngle = Math.max(-1.42, activeWorm.aimAngle - 0.028);
+              activeWorm.aimAngle = Math.max(-1.42, activeWorm.aimAngle - modernAimStep);
             } else if (aimDown) {
-              activeWorm.aimAngle = Math.min(0.85, activeWorm.aimAngle + 0.028);
+              activeWorm.aimAngle = Math.min(0.85, activeWorm.aimAngle + modernAimStep);
             } else if (
               mouseAimEnabled &&
               st.mouseCanvasPos &&
@@ -2045,6 +2112,7 @@ export default function App() {
     isTitleScreenOpen,
     gameplayMode,
     instantKODirectHit,
+    joystickConfig,
     teams,
     activeTeamCount,
     selectedBiomeId,
@@ -2114,9 +2182,9 @@ export default function App() {
     }
   };
 
-  // Touch Aiming directly on the Battlefield Canvas
+  // Touch Aiming directly on the Battlefield Canvas (if enabled in Joystick Settings)
   const handleCanvasTouchStart = (e: React.TouchEvent<HTMLCanvasElement>) => {
-    if (e.touches.length === 0) return;
+    if (!joystickConfig.touchCanvasAim || e.touches.length === 0) return;
     const st = engineRef.current;
     if (st.phase !== 'MOVE_AND_AIM' || currentTeam?.isBot) return;
     const activeWorm = st.worms.find((w) => w.id === st.activeWormId && w.isAlive);
@@ -2132,7 +2200,7 @@ export default function App() {
   };
 
   const handleCanvasTouchMove = (e: React.TouchEvent<HTMLCanvasElement>) => {
-    if (e.touches.length === 0) return;
+    if (!joystickConfig.touchCanvasAim || e.touches.length === 0) return;
     const st = engineRef.current;
     if (st.phase !== 'MOVE_AND_AIM' || currentTeam?.isBot) return;
     const activeWorm = st.worms.find((w) => w.id === st.activeWormId && w.isAlive);
@@ -2223,6 +2291,14 @@ export default function App() {
           >
             <Cpu className="w-3.5 h-3.5" />
             Opções & Godot
+          </button>
+          <button
+            onClick={() => setIsJoystickSettingsOpen(true)}
+            className="hover:text-[#FFD166] transition-colors flex items-center gap-1 whitespace-nowrap shrink-0"
+            title="Configurar Sensibilidade do Joystick"
+          >
+            <Settings className="w-3.5 h-3.5" />
+            Joystick
           </button>
           <button
             onClick={() =>
@@ -2317,6 +2393,13 @@ export default function App() {
             >
               <Layers className="w-3 h-3" />
               Modo
+            </button>
+            <button
+              onClick={() => setIsJoystickSettingsOpen(true)}
+              className="h-8 w-8 rounded-full bg-black/35 backdrop-blur-[2px] border border-white/20 text-[#FFD166] flex items-center justify-center"
+              title="Sensibilidade do Joystick"
+            >
+              <Settings className="w-3.5 h-3.5" />
             </button>
             <button
               onClick={() => setIsWardrobeOpen(true)}
@@ -2461,8 +2544,8 @@ export default function App() {
             Zero opaque boxes — clean translucent controls in bottom corners!
            ==================================================================== */}
         <div className="lg:hidden pointer-events-none absolute inset-x-0 bottom-0 p-3 flex items-end justify-between z-20">
-          {/* Bottom-Left: Translucent Virtual Thumbstick (Walk Left/Right + Aim Up/Down) */}
-          <div className="pointer-events-auto flex items-end gap-3">
+          {/* Bottom-Left: Translucent Virtual Thumbstick + Gear Settings Button */}
+          <div className="pointer-events-auto flex items-end gap-2">
             <div
               ref={joystickBaseRef}
               onPointerDown={(e) => {
@@ -2476,8 +2559,22 @@ export default function App() {
               }}
               onPointerUp={resetJoystick}
               onPointerCancel={resetJoystick}
-              className="relative w-24 h-24 sm:w-28 sm:h-28 rounded-full bg-white/10 backdrop-blur-[2px] border-2 border-white/25 flex items-center justify-center touch-none shadow-lg"
+              className={`relative rounded-full bg-white/10 backdrop-blur-[2px] border-2 border-white/25 flex items-center justify-center touch-none shadow-lg transition-all ${
+                joystickConfig.size === 'SM'
+                  ? 'w-20 h-20'
+                  : joystickConfig.size === 'LG'
+                  ? 'w-32 h-32'
+                  : 'w-24 h-24 sm:w-28 sm:h-28'
+              }`}
             >
+              {/* Deadzone visual ring inside Joystick */}
+              <div
+                className="pointer-events-none absolute rounded-full border border-dashed border-white/15"
+                style={{
+                  width: `${Math.round(joystickConfig.deadzone * 100)}%`,
+                  height: `${Math.round(joystickConfig.deadzone * 100)}%`,
+                }}
+              />
               {/* Crosshair Axis Guides inside Joystick */}
               <div className="pointer-events-none absolute inset-x-3 h-px bg-white/15" />
               <div className="pointer-events-none absolute inset-y-3 w-px bg-white/15" />
@@ -2496,6 +2593,15 @@ export default function App() {
                 }}
               />
             </div>
+
+            {/* Dedicated Translucent Gear Button right next to the Joystick */}
+            <button
+              onClick={() => setIsJoystickSettingsOpen(true)}
+              className="w-9 h-9 mb-1 rounded-full bg-black/40 active:bg-black/75 backdrop-blur-[2px] border border-white/25 flex items-center justify-center text-[#FFD166] shadow-md"
+              title="Sensibilidade do Joystick"
+            >
+              <Settings className="w-4 h-4" />
+            </button>
           </div>
 
           {/* Center Floating Translucent Power Gauge (Only visible while charging!) */}
@@ -2804,6 +2910,300 @@ export default function App() {
         instantKODirectHit={instantKODirectHit}
         onToggleInstantKO={() => setInstantKODirectHit((v) => !v)}
       />
+
+      {/* ====================================================================
+          JOYSTICK SENSITIVITY & CALIBRATION MODAL (Opened via Gear Button)
+         ==================================================================== */}
+      {isJoystickSettingsOpen && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/75 backdrop-blur-xs p-0 sm:p-4">
+          <div className="pixel-panel w-full max-w-md max-h-[92dvh] flex flex-col overflow-hidden">
+            {/* Header */}
+            <div className="flex items-center justify-between gap-2 px-4 py-3 bg-[#242038] border-b-2 border-[#3D3859]">
+              <div className="flex items-center gap-2">
+                <Settings className="w-4 h-4 text-[#FFD166]" />
+                <h2 className="font-pixel text-xs text-[#FFD166]">
+                  CALIBRAGEM DO JOYSTICK
+                </h2>
+              </div>
+              <button
+                onClick={() => setIsJoystickSettingsOpen(false)}
+                className="pixel-btn min-h-[34px] min-w-[34px] bg-[#EF476F] p-1.5 text-[#F4F1DE] flex items-center justify-center"
+                title="Fechar"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="p-4 overflow-y-auto space-y-4 text-xs">
+              {/* Quick Presets */}
+              <div>
+                <div className="font-silk font-bold text-[#F4F1DE] mb-1.5">
+                  Predefinições Rápidas
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  <button
+                    onClick={() =>
+                      setJoystickConfig((prev) => ({
+                        ...prev,
+                        aimSensitivity: 0.6,
+                        walkSensitivity: 0.8,
+                        deadzone: 0.26,
+                      }))
+                    }
+                    className={`pixel-btn py-2 px-2 text-center font-mono-num text-[11px] ${
+                      Math.abs(joystickConfig.aimSensitivity - 0.6) < 0.05
+                        ? 'bg-[#06D6A0] text-[#0F0E17] font-bold border-[#06D6A0]'
+                        : 'bg-[#141220] text-[#F4F1DE]'
+                    }`}
+                  >
+                    Preciso (60%)
+                  </button>
+                  <button
+                    onClick={() =>
+                      setJoystickConfig((prev) => ({
+                        ...prev,
+                        aimSensitivity: 1.0,
+                        walkSensitivity: 1.0,
+                        deadzone: 0.22,
+                      }))
+                    }
+                    className={`pixel-btn py-2 px-2 text-center font-mono-num text-[11px] ${
+                      Math.abs(joystickConfig.aimSensitivity - 1.0) < 0.05 &&
+                      Math.abs(joystickConfig.walkSensitivity - 1.0) < 0.05
+                        ? 'bg-[#FFD166] text-[#0F0E17] font-bold border-[#FFD166]'
+                        : 'bg-[#141220] text-[#F4F1DE]'
+                    }`}
+                  >
+                    Padrão (100%)
+                  </button>
+                  <button
+                    onClick={() =>
+                      setJoystickConfig((prev) => ({
+                        ...prev,
+                        aimSensitivity: 1.6,
+                        walkSensitivity: 1.35,
+                        deadzone: 0.14,
+                      }))
+                    }
+                    className={`pixel-btn py-2 px-2 text-center font-mono-num text-[11px] ${
+                      Math.abs(joystickConfig.aimSensitivity - 1.6) < 0.05
+                        ? 'bg-[#4CC9F0] text-[#0F0E17] font-bold border-[#4CC9F0]'
+                        : 'bg-[#141220] text-[#F4F1DE]'
+                    }`}
+                  >
+                    Ágil (160%)
+                  </button>
+                </div>
+              </div>
+
+              {/* Vertical Aim Sensitivity Slider */}
+              <div className="bg-[#141220] border border-[#3D3859] p-3 space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="font-silk font-bold text-[#FFD166]">
+                    Sensibilidade da Mira (Vertical)
+                  </span>
+                  <span className="font-mono-num font-bold text-[#06D6A0]">
+                    {Math.round(joystickConfig.aimSensitivity * 100)}%
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={25}
+                  max={250}
+                  step={5}
+                  value={Math.round(joystickConfig.aimSensitivity * 100)}
+                  onChange={(e) =>
+                    setJoystickConfig((prev) => ({
+                      ...prev,
+                      aimSensitivity: Number(e.target.value) / 100,
+                    }))
+                  }
+                  className="w-full accent-[#FFD166] cursor-pointer"
+                />
+                <div className="flex justify-between text-[10px] font-mono-num text-[#A7A9BE]">
+                  <span>25% (Mais Fina)</span>
+                  <span>100%</span>
+                  <span>250% (Mais Rápida)</span>
+                </div>
+              </div>
+
+              {/* Horizontal Walk Sensitivity Slider */}
+              <div className="bg-[#141220] border border-[#3D3859] p-3 space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="font-silk font-bold text-[#4CC9F0]">
+                    Sensibilidade de Caminhada (Horizontal)
+                  </span>
+                  <span className="font-mono-num font-bold text-[#4CC9F0]">
+                    {Math.round(joystickConfig.walkSensitivity * 100)}%
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={40}
+                  max={200}
+                  step={5}
+                  value={Math.round(joystickConfig.walkSensitivity * 100)}
+                  onChange={(e) =>
+                    setJoystickConfig((prev) => ({
+                      ...prev,
+                      walkSensitivity: Number(e.target.value) / 100,
+                    }))
+                  }
+                  className="w-full accent-[#4CC9F0] cursor-pointer"
+                />
+                <div className="flex justify-between text-[10px] font-mono-num text-[#A7A9BE]">
+                  <span>40% (Passos Curtos)</span>
+                  <span>100%</span>
+                  <span>200% (Passos Rápidos)</span>
+                </div>
+              </div>
+
+              {/* Deadzone Slider */}
+              <div className="bg-[#141220] border border-[#3D3859] p-3 space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="font-silk font-bold text-[#F4F1DE]">
+                    Zona Morta Central (Deadzone)
+                  </span>
+                  <span className="font-mono-num font-bold text-[#FFD166]">
+                    {Math.round(joystickConfig.deadzone * 100)}%
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={8}
+                  max={45}
+                  step={2}
+                  value={Math.round(joystickConfig.deadzone * 100)}
+                  onChange={(e) =>
+                    setJoystickConfig((prev) => ({
+                      ...prev,
+                      deadzone: Number(e.target.value) / 100,
+                    }))
+                  }
+                  className="w-full accent-[#06D6A0] cursor-pointer"
+                />
+                <p className="text-[10px] text-[#A7A9BE]">
+                  Evita que o personagem ande sem querer enquanto você ajusta apenas a mira vertical.
+                </p>
+              </div>
+
+              {/* Joystick Size Selector */}
+              <div className="bg-[#141220] border border-[#3D3859] p-3 space-y-2">
+                <div className="font-silk font-bold text-[#F4F1DE]">
+                  Tamanho do Analógico na Tela
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  {(
+                    [
+                      { id: 'SM', label: 'Compacto' },
+                      { id: 'MD', label: 'Médio' },
+                      { id: 'LG', label: 'Grande' },
+                    ] as const
+                  ).map((opt) => (
+                    <button
+                      key={opt.id}
+                      onClick={() =>
+                        setJoystickConfig((prev) => ({ ...prev, size: opt.id }))
+                      }
+                      className={`pixel-btn py-1.5 text-[11px] font-mono-num ${
+                        joystickConfig.size === opt.id
+                          ? 'bg-[#9B5DE5] text-white font-bold border-[#FFD166]'
+                          : 'bg-[#1D1A2F] text-[#A7A9BE]'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Extra Toggles: Invert Y & Touch Canvas Aim */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <button
+                  onClick={() =>
+                    setJoystickConfig((prev) => ({
+                      ...prev,
+                      invertY: !prev.invertY,
+                    }))
+                  }
+                  className={`pixel-btn p-2.5 text-left flex items-center justify-between ${
+                    joystickConfig.invertY
+                      ? 'bg-[#2A1D3D] border-[#FFD166]'
+                      : 'bg-[#141220] border-[#3D3859]'
+                  }`}
+                >
+                  <div>
+                    <div className="font-silk text-[11px] font-bold text-[#F4F1DE]">
+                      Inverter Eixo Y
+                    </div>
+                    <div className="text-[10px] text-[#A7A9BE]">
+                      Tipo manche de avião
+                    </div>
+                  </div>
+                  <span
+                    className={`font-mono-num text-[10px] font-bold px-2 py-0.5 ${
+                      joystickConfig.invertY
+                        ? 'bg-[#FFD166] text-[#0F0E17]'
+                        : 'bg-[#242038] text-[#A7A9BE]'
+                    }`}
+                  >
+                    {joystickConfig.invertY ? 'ATIVO' : 'OFF'}
+                  </span>
+                </button>
+
+                <button
+                  onClick={() =>
+                    setJoystickConfig((prev) => ({
+                      ...prev,
+                      touchCanvasAim: !prev.touchCanvasAim,
+                    }))
+                  }
+                  className={`pixel-btn p-2.5 text-left flex items-center justify-between ${
+                    joystickConfig.touchCanvasAim
+                      ? 'bg-[#172B2E] border-[#06D6A0]'
+                      : 'bg-[#141220] border-[#3D3859]'
+                  }`}
+                >
+                  <div>
+                    <div className="font-silk text-[11px] font-bold text-[#F4F1DE]">
+                      Toque no Cenário
+                    </div>
+                    <div className="text-[10px] text-[#A7A9BE]">
+                      Mirar ao tocar na tela
+                    </div>
+                  </div>
+                  <span
+                    className={`font-mono-num text-[10px] font-bold px-2 py-0.5 ${
+                      joystickConfig.touchCanvasAim
+                        ? 'bg-[#06D6A0] text-[#0F0E17]'
+                        : 'bg-[#242038] text-[#A7A9BE]'
+                    }`}
+                  >
+                    {joystickConfig.touchCanvasAim ? 'ATIVO' : 'OFF'}
+                  </span>
+                </button>
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="px-4 py-3 bg-[#1A1829] border-t-2 border-[#3D3859] flex items-center justify-between gap-2">
+              <button
+                onClick={() => setJoystickConfig(DEFAULT_JOYSTICK_CONFIG)}
+                className="pixel-btn min-h-[38px] bg-[#242038] px-3 py-1.5 text-xs text-[#A7A9BE] hover:text-[#F4F1DE]"
+              >
+                Restaurar Padrão
+              </button>
+              <button
+                onClick={() => setIsJoystickSettingsOpen(false)}
+                className="pixel-btn min-h-[38px] bg-[#06D6A0] px-5 py-1.5 text-xs font-bold text-[#0F0E17] border-[#06D6A0]"
+              >
+                Pronto
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
