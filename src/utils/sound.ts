@@ -52,6 +52,42 @@ class RetroSoundEngine {
     osc.stop(ctx.currentTime + 0.13);
   }
 
+  public playKnockoutLaunch() {
+    const ctx = this.getContext();
+    if (!ctx) return;
+    // Dramatic Homerun Smash chord + rising whistle
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(160, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(980, ctx.currentTime + 0.45);
+    gain.gain.setValueAtTime(0.18, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.48);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.48);
+  }
+
+  public playStarKO() {
+    const ctx = this.getContext();
+    if (!ctx) return;
+    const notes = [587.33, 880, 1174.66, 1760];
+    notes.forEach((freq, idx) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'triangle';
+      const startTime = ctx.currentTime + idx * 0.045;
+      osc.frequency.setValueAtTime(freq, startTime);
+      gain.gain.setValueAtTime(0.11, startTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, startTime + 0.18);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(startTime);
+      osc.stop(startTime + 0.19);
+    });
+  }
+
   public playChargeTick(powerPercent: number) {
     const ctx = this.getContext();
     if (!ctx) return;

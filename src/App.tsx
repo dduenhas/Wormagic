@@ -5,6 +5,8 @@ import {
   Cpu,
   Flame,
   Layers,
+  Maximize2,
+  Minimize2,
   Palette,
   RotateCcw,
   SkipForward,
@@ -176,6 +178,24 @@ export default function App() {
   const [gameplayMode, setGameplayMode] = useState<GameplayMode>('MODERN_V2');
   const [isTitleScreenOpen, setIsTitleScreenOpen] = useState<boolean>(true);
 
+  // Direct-Hit Knockout Option (Default: false, keeps standard HP reduction)
+  const [instantKODirectHit, setInstantKODirectHit] = useState<boolean>(false);
+
+  // Responsive Smart Camera Follow (automatically enabled on small screens < 768px, toggleable anytime)
+  const [smartCameraZoom, setSmartCameraZoom] = useState<boolean>(() =>
+    typeof window !== 'undefined' ? window.innerWidth < 768 : false
+  );
+
+  useEffect(() => {
+    const handleResize = () => {
+      if (window.innerWidth < 768) {
+        setSmartCameraZoom(true);
+      }
+    };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
   // Persistent Level & XP Progression
   const [progression, setProgression] = useState<PlayerProgression>(() => {
     try {
@@ -261,8 +281,13 @@ export default function App() {
     power: number;
     powerDirection: 1 | -1;
     keys: Record<string, boolean>;
+    touchMoveDir: -1 | 0 | 1;
+    touchAimDir: -1 | 0 | 1;
     mouseCanvasPos: { x: number; y: number } | null;
     cameraShake: number;
+    cameraX: number;
+    cameraY: number;
+    cameraZoom: number;
     hitStopFrames: number;
     lightningBolts: { x: number; y: number; life: number }[];
     tick: number;
@@ -286,8 +311,13 @@ export default function App() {
     power: 0,
     powerDirection: 1,
     keys: {},
+    touchMoveDir: 0,
+    touchAimDir: 0,
     mouseCanvasPos: null,
     cameraShake: 0,
+    cameraX: CANVAS_W / 2,
+    cameraY: CANVAS_H / 2,
+    cameraZoom: 1,
     hitStopFrames: 0,
     lightningBolts: [],
     tick: 0,
@@ -421,6 +451,8 @@ export default function App() {
             jumpsUsed: 0,
             stamina: 100,
             isAlive: true,
+            isLaunchingOut: false,
+            launchSpin: 0,
             cosmetics: { ...team.defaultCosmetics },
           });
         }
@@ -459,8 +491,13 @@ export default function App() {
         power: 0,
         powerDirection: 1,
         keys: {},
+        touchMoveDir: 0,
+        touchAimDir: 0,
         mouseCanvasPos: null,
         cameraShake: 0,
+        cameraX: firstWorm ? firstWorm.x : CANVAS_W / 2,
+        cameraY: firstWorm ? firstWorm.y : CANVAS_H / 2,
+        cameraZoom: 1,
         hitStopFrames: 0,
         lightningBolts: [],
         tick: 0,
@@ -482,7 +519,9 @@ export default function App() {
   // Advance to next alive team & worm turn
   const advanceTurn = useCallback(() => {
     const st = engineRef.current;
-    const aliveTeams = new Set(st.worms.filter((w) => w.isAlive).map((w) => w.teamId));
+    const aliveTeams = new Set(
+      st.worms.filter((w) => w.isAlive && !w.isLaunchingOut).map((w) => w.teamId)
+    );
 
     if (aliveTeams.size <= 1) {
       const winnerId = Array.from(aliveTeams)[0];
@@ -501,7 +540,9 @@ export default function App() {
       }
     }
 
-    const teamWorms = st.worms.filter((w) => w.teamId === nextTeam && w.isAlive);
+    const teamWorms = st.worms.filter(
+      (w) => w.teamId === nextTeam && w.isAlive && !w.isLaunchingOut
+    );
     const pointer = st.teamWormTurnPointer[nextTeam] % teamWorms.length;
     const chosenWorm = teamWorms[pointer];
     st.teamWormTurnPointer[nextTeam] = pointer + 1;
@@ -518,6 +559,8 @@ export default function App() {
     st.charging = false;
     st.power = 0;
     st.powerDirection = 1;
+    st.touchMoveDir = 0;
+    st.touchAimDir = 0;
     st.botThinkingTimer = 65;
 
     if (Math.random() < 0.5 && st.crates.filter((c) => !c.collected).length < 3) {
@@ -566,7 +609,6 @@ export default function App() {
         );
       }
 
-      // Sweet-spot Critical Shot only in MODERN_V2 (86%..96% power)
       const isCrit =
         gameplayMode === 'MODERN_V2' && powerPercent >= 86 && powerPercent <= 96;
       const cry = isCrit
@@ -736,7 +778,7 @@ export default function App() {
         }
       }
 
-      if (gameplayMode === 'MODERN_V2') {
+      if (gameplayMode === 'MODERN_V2' || instantKODirectHit) {
         st.shockwaves.push({
           x: proj.x,
           y: proj.y,
@@ -801,10 +843,51 @@ export default function App() {
       const hitRadius = blastR + 20;
 
       st.worms.forEach((w) => {
-        if (!w.isAlive) return;
+        if (!w.isAlive || w.isLaunchingOut) return;
         const dx = w.x - proj.x;
         const dy = w.y - proj.y;
         const dist = Math.hypot(dx, dy);
+
+        // Check Direct Hit Knockout Launch Mode!
+        const isDirectHitOnWorm =
+          proj.directHitWormId === w.id || dist <= Math.max(24, blastR * 0.58);
+
+        if (instantKODirectHit && isDirectHitOnWorm) {
+          w.isLaunchingOut = true;
+          w.launchSpin = 0.15;
+          const launchDirX =
+            Math.abs(dx) > 3 ? Math.sign(dx) : proj.vx >= 0 ? 1 : -1;
+          w.vx = launchDirX * (15.5 + Math.random() * 4.5);
+          w.vy = -18.5 - Math.random() * 3.5;
+          w.isGrounded = false;
+          totalHitDmg += w.hp;
+          eliminations++;
+
+          soundFX.playKnockoutLaunch();
+          st.cameraShake = 26;
+          st.hitStopFrames = 5;
+
+          st.shockwaves.push({
+            x: w.x,
+            y: w.y,
+            radius: 6,
+            maxRadius: 68,
+            color: '#FFD166',
+            alpha: 1.0,
+          });
+
+          st.floatingTexts.push({
+            id: `ko-launch-${Date.now()}-${w.id}`,
+            x: w.x,
+            y: w.y - 32,
+            vy: -1.5,
+            text: 'FORA DO CENÁRIO! K.O.!',
+            color: '#FFD166',
+            life: 95,
+          });
+          return;
+        }
+
         if (dist <= hitRadius) {
           const falloff = Math.max(0.28, 1 - dist / (hitRadius + 8));
           const dmg = Math.max(1, Math.round(maxDmg * falloff));
@@ -848,13 +931,17 @@ export default function App() {
         const xpEarned = Math.round(totalHitDmg * 1.25) + eliminations * 65;
         awardXp(
           xpEarned,
-          proj.isCriticalShot ? 'Crítico Arcano' : 'Impacto Arcano',
+          instantKODirectHit && eliminations > 0
+            ? 'K.O. Fora do Cenário'
+            : proj.isCriticalShot
+            ? 'Crítico Arcano'
+            : 'Impacto Arcano',
           proj.x,
           proj.y
         );
       }
     },
-    [awardXp, highParticles, gameplayMode]
+    [awardXp, highParticles, gameplayMode, instantKODirectHit]
   );
 
   // Initialize first match on mount
@@ -863,7 +950,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Perform Jump (Simple jump in CLASSIC_V1, Double Jump in MODERN_V2)
+  // Perform Jump
   const performJump = useCallback(() => {
     const st = engineRef.current;
     const activeWorm = st.worms.find((w) => w.id === st.activeWormId && w.isAlive);
@@ -910,7 +997,7 @@ export default function App() {
     }
   }, [gameplayMode]);
 
-  // Perform Acrobatic Backflip / Dash (MODERN_V2 only)
+  // Perform Acrobatic Backflip / Dash
   const performAcrobaticDash = useCallback(() => {
     if (gameplayMode !== 'MODERN_V2') return;
     const st = engineRef.current;
@@ -1093,7 +1180,7 @@ export default function App() {
       const activeWorm = st.worms.find((w) => w.id === st.activeWormId && w.isAlive);
       const currentTeam = teams[st.activeTeamIdx];
 
-      // 1. Handle Human Input or Bot AI during MOVE_AND_AIM
+      // 1. Handle Human Input (Keyboard + Touch Hold) or Bot AI during MOVE_AND_AIM
       if (
         !isTitleScreenOpen &&
         st.phase === 'MOVE_AND_AIM' &&
@@ -1101,11 +1188,18 @@ export default function App() {
         !victoryTeam
       ) {
         if (!currentTeam?.isBot) {
-          const moveLeft = st.keys['ArrowLeft'] || st.keys['KeyA'];
-          const moveRight = st.keys['ArrowRight'] || st.keys['KeyD'];
+          const moveLeft =
+            st.keys['ArrowLeft'] || st.keys['KeyA'] || st.touchMoveDir === -1;
+          const moveRight =
+            st.keys['ArrowRight'] || st.keys['KeyD'] || st.touchMoveDir === 1;
+          const aimUp =
+            st.keys['ArrowUp'] ||
+            (gameplayMode === 'CLASSIC_V1' && st.keys['KeyW']) ||
+            st.touchAimDir === -1;
+          const aimDown =
+            st.keys['ArrowDown'] || st.keys['KeyS'] || st.touchAimDir === 1;
 
           if (gameplayMode === 'CLASSIC_V1') {
-            // 1st Version: Classic direct step movement + W/S aiming + linear power bar
             if (moveLeft) {
               activeWorm.facing = -1;
               if (!isPixelSolid(activeWorm.x - 6, activeWorm.y - 4)) {
@@ -1118,8 +1212,6 @@ export default function App() {
               }
             }
 
-            const aimUp = st.keys['ArrowUp'] || st.keys['KeyW'];
-            const aimDown = st.keys['ArrowDown'] || st.keys['KeyS'];
             if (aimUp) {
               activeWorm.aimAngle = Math.max(-1.42, activeWorm.aimAngle - 0.026);
             } else if (aimDown) {
@@ -1134,7 +1226,6 @@ export default function App() {
               }
             }
           } else {
-            // 2nd Version: Modern smooth acceleration, mouse tracking aim & ping-pong sweet-spot
             if ((moveLeft || moveRight) && activeWorm.stamina > 0) {
               const dir = moveLeft ? -1 : 1;
               activeWorm.facing = dir;
@@ -1145,13 +1236,16 @@ export default function App() {
               }
             }
 
-            const aimUp = st.keys['ArrowUp'];
-            const aimDown = st.keys['ArrowDown'] || st.keys['KeyS'];
             if (aimUp) {
               activeWorm.aimAngle = Math.max(-1.42, activeWorm.aimAngle - 0.028);
             } else if (aimDown) {
               activeWorm.aimAngle = Math.min(0.85, activeWorm.aimAngle + 0.028);
-            } else if (mouseAimEnabled && st.mouseCanvasPos && !moveLeft && !moveRight) {
+            } else if (
+              mouseAimEnabled &&
+              st.mouseCanvasPos &&
+              !moveLeft &&
+              !moveRight
+            ) {
               const dx = st.mouseCanvasPos.x - activeWorm.x;
               const dy = st.mouseCanvasPos.y - (activeWorm.y - 4);
               if (Math.hypot(dx, dy) > 18) {
@@ -1180,11 +1274,10 @@ export default function App() {
             }
           }
         } else {
-          // Bot AI Turn Execution
           st.botThinkingTimer--;
           if (st.botThinkingTimer === 35) {
             const enemies = st.worms.filter(
-              (w) => w.isAlive && w.teamId !== activeWorm.teamId
+              (w) => w.isAlive && !w.isLaunchingOut && w.teamId !== activeWorm.teamId
             );
             if (enemies.length > 0) {
               const target = enemies[Math.floor(Math.random() * enemies.length)];
@@ -1208,9 +1301,88 @@ export default function App() {
         }
       }
 
-      // 2. Update All Worms Physics
+      // 2. Update All Worms Physics (including Out-of-Stage Knockout Launch!)
+      let anyWormLaunching = false;
       st.worms.forEach((w) => {
         if (!w.isAlive) return;
+
+        // Special Out-of-Stage Launch Animation when hit in Direct-Hit KO mode!
+        if (w.isLaunchingOut) {
+          anyWormLaunching = true;
+          w.x += w.vx;
+          w.y += w.vy;
+          w.vy += 0.22; // Slight arc while blasting out of the stage
+          w.launchSpin = (w.launchSpin || 0.1) + (w.vx >= 0 ? 0.44 : -0.44);
+
+          // Spawn continuous comet trail of stars and chalk sparks behind the flying worm
+          if (st.tick % 2 === 0) {
+            const colors = ['#FFD166', '#00F5D4', '#EF476F', '#FFFFFF'];
+            for (let k = 0; k < 2; k++) {
+              st.particles.push({
+                x: w.x + (Math.random() - 0.5) * 10,
+                y: w.y + (Math.random() - 0.5) * 10,
+                vx: -w.vx * 0.15 + (Math.random() - 0.5) * 2,
+                vy: -w.vy * 0.15 + (Math.random() - 0.5) * 2,
+                color: colors[(st.tick + k) % colors.length],
+                size: k === 0 ? 5 : 3,
+                life: 24,
+                maxLife: 24,
+                gravity: 0.02,
+              });
+            }
+          }
+
+          // Check if worm has exited the arena boundaries -> Trigger Star K.O. Edge Burst!
+          if (
+            w.x < -35 ||
+            w.x > CANVAS_W + 35 ||
+            w.y < -55 ||
+            w.y >= WATER_Y + 15
+          ) {
+            w.isAlive = false;
+            w.isLaunchingOut = false;
+            w.hp = 0;
+            soundFX.playStarKO();
+            st.cameraShake = 16;
+
+            const clampX = Math.max(32, Math.min(CANVAS_W - 32, w.x));
+            const clampY = Math.max(32, Math.min(WATER_Y - 12, w.y));
+
+            st.shockwaves.push({
+              x: clampX,
+              y: clampY,
+              radius: 8,
+              maxRadius: 85,
+              color: '#FFD166',
+              alpha: 1.0,
+            });
+            st.shockwaves.push({
+              x: clampX,
+              y: clampY,
+              radius: 4,
+              maxRadius: 52,
+              color: '#00F5D4',
+              alpha: 1.0,
+            });
+
+            for (let s = 0; s < 32; s++) {
+              const ang = (s / 32) * Math.PI * 2;
+              const spd = 2.5 + (s % 3) * 2.2;
+              st.particles.push({
+                x: clampX,
+                y: clampY,
+                vx: Math.cos(ang) * spd,
+                vy: Math.sin(ang) * spd,
+                color: s % 2 === 0 ? '#FFD166' : '#00F5D4',
+                size: s % 3 === 0 ? 6 : 4,
+                life: 36,
+                maxLife: 36,
+                gravity: 0.04,
+              });
+            }
+          }
+          return;
+        }
 
         if (w.speechBubble) {
           w.speechBubble.timer--;
@@ -1327,7 +1499,7 @@ export default function App() {
         }
 
         st.worms.forEach((w) => {
-          if (!w.isAlive || crate.collected) return;
+          if (!w.isAlive || w.isLaunchingOut || crate.collected) return;
           if (Math.hypot(w.x - crate.x, w.y - crate.y) < 24) {
             crate.collected = true;
             soundFX.playLevelUp();
@@ -1423,38 +1595,49 @@ export default function App() {
           }
         }
 
-        let hitWorm = false;
-        if (p.age > 7 && p.fuseTimer === 0) {
+        let hitWormId: string | undefined;
+        if (p.age > 6 && p.fuseTimer === 0) {
           for (const w of st.worms) {
-            if (w.isAlive && Math.hypot(w.x - p.x, w.y - p.y) < 14) {
-              hitWorm = true;
+            if (
+              w.isAlive &&
+              !w.isLaunchingOut &&
+              Math.hypot(w.x - p.x, w.y - p.y) < 16
+            ) {
+              hitWormId = w.id;
               break;
             }
           }
         }
 
-        if (hitWorm || isPixelSolid(p.x, p.y)) {
-          if (p.bouncesLeft > 0 && !hitWorm) {
+        if (hitWormId || isPixelSolid(p.x, p.y)) {
+          if (p.bouncesLeft > 0 && !hitWormId) {
             p.bouncesLeft--;
             p.vy = -p.vy * 0.66;
             p.vx *= 0.82;
             p.y -= 4;
             soundFX.playBounce();
           } else {
+            p.directHitWormId = hitWormId;
             triggerDetonation(p);
             st.projectiles.splice(i, 1);
           }
         }
       }
 
-      if (st.phase === 'PROJECTILE_FLYING' && st.projectiles.length === 0) {
+      if (
+        st.phase === 'PROJECTILE_FLYING' &&
+        st.projectiles.length === 0 &&
+        !anyWormLaunching
+      ) {
         st.phase = 'POST_SHOT';
         st.postShotDelay = 55;
         setTurnPhase('POST_SHOT');
       } else if (st.phase === 'POST_SHOT') {
-        st.postShotDelay--;
-        if (st.postShotDelay <= 0) {
-          advanceTurn();
+        if (!anyWormLaunching) {
+          st.postShotDelay--;
+          if (st.postShotDelay <= 0) {
+            advanceTurn();
+          }
         }
       }
 
@@ -1494,11 +1677,39 @@ export default function App() {
 
       if (st.tick % 12 === 0) {
         const summary = teams.slice(0, activeTeamCount).map((t, idx) => {
-          const teamWorms = st.worms.filter((w) => w.teamId === idx && w.isAlive);
+          const teamWorms = st.worms.filter(
+            (w) => w.teamId === idx && w.isAlive && !w.isLaunchingOut
+          );
           const totalHp = teamWorms.reduce((acc, w) => acc + w.hp, 0);
           return { id: t.id, totalHp, aliveCount: teamWorms.length };
         });
         setTeamHpSummary(summary);
+      }
+
+      // Update Smooth Camera Tracking (for mobile & small viewports or when Smart Zoom is active)
+      const targetZoom = smartCameraZoom ? 1.55 : 1.0;
+      st.cameraZoom += (targetZoom - st.cameraZoom) * 0.14;
+
+      const launchingWorm = st.worms.find((w) => w.isAlive && w.isLaunchingOut);
+      const leadProjectile = st.projectiles[0];
+      const focusTarget = launchingWorm || leadProjectile || activeWorm;
+
+      if (focusTarget && st.cameraZoom > 1.02) {
+        const halfViewW = CANVAS_W / (2 * st.cameraZoom);
+        const halfViewH = CANVAS_H / (2 * st.cameraZoom);
+        const clampedTargetX = Math.max(
+          halfViewW,
+          Math.min(CANVAS_W - halfViewW, focusTarget.x)
+        );
+        const clampedTargetY = Math.max(
+          halfViewH,
+          Math.min(CANVAS_H - halfViewH, focusTarget.y)
+        );
+        st.cameraX += (clampedTargetX - st.cameraX) * 0.15;
+        st.cameraY += (clampedTargetY - st.cameraY) * 0.15;
+      } else {
+        st.cameraX += (CANVAS_W / 2 - st.cameraX) * 0.2;
+        st.cameraY += (CANVAS_H / 2 - st.cameraY) * 0.2;
       }
 
       // ====================================================================
@@ -1510,6 +1721,14 @@ export default function App() {
         const biome = BIOMES.find((b) => b.id === selectedBiomeId) || BIOMES[0];
 
         ctx.save();
+
+        // Apply Smart Camera Zoom & Pan
+        if (st.cameraZoom > 1.01) {
+          ctx.translate(CANVAS_W / 2, CANVAS_H / 2);
+          ctx.scale(st.cameraZoom, st.cameraZoom);
+          ctx.translate(-st.cameraX, -st.cameraY);
+        }
+
         if (st.cameraShake > 0) {
           const sx = (Math.random() - 0.5) * st.cameraShake;
           const sy = (Math.random() - 0.5) * st.cameraShake;
@@ -1528,7 +1747,6 @@ export default function App() {
           drawWindStreamlines(ctx, CANVAS_W, CANVAS_H, st.weather, st.tick);
           drawThermalZones(ctx, st.thermals, st.tick);
         } else {
-          // Subtle classic stars for Version 1
           ctx.fillStyle = 'rgba(244, 241, 222, 0.14)';
           for (let s = 0; s < 28; s++) {
             const sx = (s * 173) % CANVAS_W;
@@ -1596,10 +1814,11 @@ export default function App() {
             simX += simVx;
             simY += simVy;
 
-            if (gameplayMode === 'MODERN_V2') {
+            if (gameplayMode === 'MODERN_V2' || instantKODirectHit) {
               st.worms.forEach((ew) => {
                 if (
                   ew.isAlive &&
+                  !ew.isLaunchingOut &&
                   ew.id !== activeWorm.id &&
                   Math.hypot(ew.x - simX, ew.y - simY) <= weapon.blastRadius + 14
                 ) {
@@ -1638,7 +1857,7 @@ export default function App() {
         // Draw Worms
         st.worms.forEach((w) => {
           if (!w.isAlive) return;
-          const isTurn = w.id === st.activeWormId;
+          const isTurn = w.id === st.activeWormId && !w.isLaunchingOut;
           const team = teams[w.teamId] || teams[0];
 
           drawPixelWorm(
@@ -1650,8 +1869,11 @@ export default function App() {
             w.cosmetics,
             isTurn,
             st.tick,
-            gameplayMode === 'MODERN_V2' ? w.vy : 0
+            gameplayMode === 'MODERN_V2' ? w.vy : 0,
+            w.isLaunchingOut ? w.launchSpin || 0 : 0
           );
+
+          if (w.isLaunchingOut) return;
 
           if (isTurn && st.phase === 'MOVE_AND_AIM') {
             if (gameplayMode === 'MODERN_V2') {
@@ -1680,7 +1902,11 @@ export default function App() {
             ctx.font = 'bold 9px "JetBrains Mono", monospace';
             ctx.fillStyle = '#EF476F';
             ctx.textAlign = 'center';
-            ctx.fillText('ALVO NA MIRA', Math.round(w.x), Math.round(w.y) + 22);
+            ctx.fillText(
+              instantKODirectHit ? 'K.O. DIRETO!' : 'ALVO NA MIRA',
+              Math.round(w.x),
+              Math.round(w.y) + 22
+            );
           }
 
           const labelY = Math.round(w.y) - 31;
@@ -1773,6 +1999,8 @@ export default function App() {
   }, [
     isTitleScreenOpen,
     gameplayMode,
+    instantKODirectHit,
+    smartCameraZoom,
     teams,
     activeTeamCount,
     selectedBiomeId,
@@ -1791,12 +2019,26 @@ export default function App() {
     SPELL_ARSENAL.find((w) => w.id === selectedWeaponId) || SPELL_ARSENAL[0];
   const currentTeam = teams[activeTeamIndex] || teams[0];
 
+  // Convert client screen coordinates to internal 1280x720 world coordinates (accounting for camera zoom/pan)
+  const clientToWorldCoords = (clientX: number, clientY: number) => {
+    const canvas = displayCanvasRef.current;
+    if (!canvas) return { x: CANVAS_W / 2, y: CANVAS_H / 2 };
+    const rect = canvas.getBoundingClientRect();
+    const rawX = ((clientX - rect.left) / rect.width) * CANVAS_W;
+    const rawY = ((clientY - rect.top) / rect.height) * CANVAS_H;
+
+    const st = engineRef.current;
+    if (st.cameraZoom > 1.01) {
+      return {
+        x: (rawX - CANVAS_W / 2) / st.cameraZoom + st.cameraX,
+        y: (rawY - CANVAS_H / 2) / st.cameraZoom + st.cameraY,
+      };
+    }
+    return { x: rawX, y: rawY };
+  };
+
   const handleCanvasMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!displayCanvasRef.current) return;
-    const rect = displayCanvasRef.current.getBoundingClientRect();
-    const mx = ((e.clientX - rect.left) / rect.width) * CANVAS_W;
-    const my = ((e.clientY - rect.top) / rect.height) * CANVAS_H;
-    engineRef.current.mouseCanvasPos = { x: mx, y: my };
+    engineRef.current.mouseCanvasPos = clientToWorldCoords(e.clientX, e.clientY);
   };
 
   const handleCanvasMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -1804,14 +2046,11 @@ export default function App() {
     const st = engineRef.current;
     if (st.phase !== 'MOVE_AND_AIM' || currentTeam?.isBot) return;
     const activeWorm = st.worms.find((w) => w.id === st.activeWormId && w.isAlive);
-    if (!activeWorm || !displayCanvasRef.current) return;
+    if (!activeWorm) return;
 
-    const rect = displayCanvasRef.current.getBoundingClientRect();
-    const clickX = ((e.clientX - rect.left) / rect.width) * CANVAS_W;
-    const clickY = ((e.clientY - rect.top) / rect.height) * CANVAS_H;
-
-    const dx = clickX - activeWorm.x;
-    const dy = clickY - (activeWorm.y - 4);
+    const worldPt = clientToWorldCoords(e.clientX, e.clientY);
+    const dx = worldPt.x - activeWorm.x;
+    const dy = worldPt.y - (activeWorm.y - 4);
     activeWorm.facing = dx >= 0 ? 1 : -1;
     activeWorm.aimAngle = Math.max(-1.42, Math.min(0.85, Math.atan2(dy, Math.abs(dx))));
 
@@ -1830,35 +2069,45 @@ export default function App() {
     }
   };
 
-  const triggerStepMove = (dir: -1 | 1) => {
+  // Touch Aiming directly on the Battlefield Canvas for mobile users
+  const handleCanvasTouchStart = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    if (e.touches.length === 0) return;
     const st = engineRef.current;
+    if (st.phase !== 'MOVE_AND_AIM' || currentTeam?.isBot) return;
     const activeWorm = st.worms.find((w) => w.id === st.activeWormId && w.isAlive);
-    if (!activeWorm || st.phase !== 'MOVE_AND_AIM') return;
-    activeWorm.facing = dir;
-    if (gameplayMode === 'CLASSIC_V1') {
-      if (!isPixelSolid(activeWorm.x + dir * 8, activeWorm.y - 4)) {
-        activeWorm.x = Math.max(18, Math.min(CANVAS_W - 18, activeWorm.x + dir * 12));
-      }
-    } else if (activeWorm.stamina > 0) {
-      activeWorm.vx = dir * 2.8;
-      activeWorm.stamina = Math.max(0, activeWorm.stamina - 4);
-      setActiveStamina(Math.round(activeWorm.stamina));
-    }
+    if (!activeWorm) return;
+
+    const touch = e.touches[0];
+    const worldPt = clientToWorldCoords(touch.clientX, touch.clientY);
+    st.mouseCanvasPos = worldPt;
+    const dx = worldPt.x - activeWorm.x;
+    const dy = worldPt.y - (activeWorm.y - 4);
+    activeWorm.facing = dx >= 0 ? 1 : -1;
+    activeWorm.aimAngle = Math.max(-1.42, Math.min(0.85, Math.atan2(dy, Math.abs(dx))));
   };
 
-  const triggerStepAim = (delta: number) => {
+  const handleCanvasTouchMove = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    if (e.touches.length === 0) return;
     const st = engineRef.current;
+    if (st.phase !== 'MOVE_AND_AIM' || currentTeam?.isBot) return;
     const activeWorm = st.worms.find((w) => w.id === st.activeWormId && w.isAlive);
-    if (!activeWorm || st.phase !== 'MOVE_AND_AIM') return;
-    activeWorm.aimAngle = Math.max(-1.42, Math.min(0.85, activeWorm.aimAngle + delta));
+    if (!activeWorm) return;
+
+    const touch = e.touches[0];
+    const worldPt = clientToWorldCoords(touch.clientX, touch.clientY);
+    st.mouseCanvasPos = worldPt;
+    const dx = worldPt.x - activeWorm.x;
+    const dy = worldPt.y - (activeWorm.y - 4);
+    activeWorm.facing = dx >= 0 ? 1 : -1;
+    activeWorm.aimAngle = Math.max(-1.42, Math.min(0.85, Math.atan2(dy, Math.abs(dx))));
   };
 
   return (
-    <div className="relative w-screen h-screen overflow-hidden bg-[#0F0E17] select-none flex flex-col">
+    <div className="relative w-screen h-dvh overflow-hidden bg-[#0F0E17] select-none flex flex-col">
       {/* ====================================================================
-          TOP NAVIGATION BAR (3-Zone Contract)
+          TOP NAVIGATION BAR (3-Zone Contract, Compact on Mobile <= 7% height)
          ==================================================================== */}
-      <header className="z-20 flex items-center justify-between gap-8 px-5 py-2.5 bg-[#161426]/95 border-b-2 border-[#3D3859]">
+      <header className="z-20 flex items-center justify-between gap-2 sm:gap-6 px-3 sm:px-5 py-1.5 sm:py-2.5 bg-[#161426]/95 border-b-2 border-[#3D3859]">
         {/* Zone 1: Brand Title */}
         <a
           href="#top"
@@ -1866,46 +2115,46 @@ export default function App() {
             e.preventDefault();
             setIsTitleScreenOpen(true);
           }}
-          className="font-pixel text-xs md:text-sm text-[#FFD166] tracking-tight whitespace-nowrap shrink-0"
+          className="font-pixel text-[10px] sm:text-xs md:text-sm text-[#FFD166] tracking-tight whitespace-nowrap shrink-0"
         >
           GRIMÓRIO DE GIZ
         </a>
 
-        {/* Zone 2: 5 Single-Line Action Links */}
-        <nav className="flex items-center gap-5 text-xs font-medium text-[#A7A9BE] overflow-x-auto">
+        {/* Zone 2: Concise Single-Line Action Links (Scrollable on narrow mobile) */}
+        <nav className="flex items-center gap-3 sm:gap-5 text-[11px] sm:text-xs font-medium text-[#A7A9BE] overflow-x-auto no-scrollbar py-0.5">
           <button
             onClick={() => setIsTitleScreenOpen(true)}
-            className="hover:text-[#FFD166] transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
+            className="hover:text-[#FFD166] transition-colors flex items-center gap-1 whitespace-nowrap shrink-0"
           >
             <Layers className="w-3.5 h-3.5" />
-            {gameplayMode === 'CLASSIC_V1' ? '1ª Versão (Simples)' : '2ª Versão (Moderna)'}
+            {gameplayMode === 'CLASSIC_V1' ? '1ª Versão' : '2ª Versão'}
           </button>
           <button
             onClick={() => setIsArsenalOpen(true)}
-            className="hover:text-[#FFD166] transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
+            className="hover:text-[#FFD166] transition-colors flex items-center gap-1 whitespace-nowrap shrink-0"
           >
             <BookOpen className="w-3.5 h-3.5" />
-            Grimório & Nível {progression.level}
+            Grimório (Nv.{progression.level})
           </button>
           <button
             onClick={() => setIsWardrobeOpen(true)}
-            className="hover:text-[#06D6A0] transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
+            className="hover:text-[#06D6A0] transition-colors flex items-center gap-1 whitespace-nowrap shrink-0"
           >
             <Palette className="w-3.5 h-3.5" />
-            Vestiário & Equipes
+            Config & Equipes
           </button>
           <button
             onClick={() => setIsGodotModalOpen(true)}
-            className="hover:text-[#4CC9F0] transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
+            className="hover:text-[#4CC9F0] transition-colors flex items-center gap-1 whitespace-nowrap shrink-0"
           >
             <Cpu className="w-3.5 h-3.5" />
-            Motor Godot 4
+            Opções & Godot
           </button>
           <button
             onClick={() =>
               initMatch(teams, activeTeamCount, selectedBiomeId, gameplayMode)
             }
-            className="hover:text-[#F4F1DE] transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
+            className="hover:text-[#F4F1DE] transition-colors flex items-center gap-1 whitespace-nowrap shrink-0"
           >
             <RotateCcw className="w-3.5 h-3.5" />
             Novo Mapa
@@ -1913,13 +2162,14 @@ export default function App() {
         </nav>
 
         {/* Zone 3: 1 Primary Action Button */}
-        <div className="flex items-center gap-3 shrink-0">
+        <div className="flex items-center shrink-0">
           <button
             onClick={advanceTurn}
-            className="pixel-btn bg-[#EF476F] hover:bg-[#D93860] px-3.5 py-1.5 text-xs font-bold text-[#F4F1DE] border-[#EF476F] flex items-center gap-1.5 whitespace-nowrap shrink-0"
+            className="pixel-btn min-h-[36px] sm:min-h-[38px] bg-[#EF476F] hover:bg-[#D93860] px-2.5 sm:px-3.5 py-1 text-[11px] sm:text-xs font-bold text-[#F4F1DE] border-[#EF476F] flex items-center gap-1 whitespace-nowrap shrink-0"
           >
             <SkipForward className="w-3.5 h-3.5" />
-            Passar Turno
+            <span className="hidden sm:inline">Passar Turno</span>
+            <span className="sm:hidden">Turno</span>
           </button>
         </div>
       </header>
@@ -1935,26 +2185,29 @@ export default function App() {
           onMouseMove={handleCanvasMouseMove}
           onMouseDown={handleCanvasMouseDown}
           onMouseUp={handleCanvasMouseUp}
-          className="pixelated w-full h-full object-fill cursor-crosshair"
+          onTouchStart={handleCanvasTouchStart}
+          onTouchMove={handleCanvasTouchMove}
+          className="pixelated w-full h-full object-cover md:object-fill cursor-crosshair touch-none"
         />
 
-        {/* Top-Left HUD: Turn Timer & Active Team */}
-        <div className="pointer-events-none absolute top-3 left-4 flex items-center gap-3">
-          <div className="pixel-panel px-3.5 py-2 flex items-center gap-3">
+        {/* Top-Left HUD: Turn Timer, Active Team & Smart Camera Toggle */}
+        <div className="pointer-events-none absolute top-2 sm:top-3 left-2 sm:left-4 flex items-center gap-2 sm:gap-3">
+          <div className="pixel-panel px-2.5 sm:px-3.5 py-1.5 sm:py-2 flex items-center gap-2.5 sm:gap-3">
             <div
-              className="font-mono-num text-xl md:text-2xl font-bold"
+              className="font-mono-num text-base sm:text-xl md:text-2xl font-bold"
               style={{ color: turnTimer <= 8 ? '#EF476F' : '#FFD166' }}
             >
               {String(turnTimer).padStart(2, '0')}s
             </div>
-            <div className="border-l border-[#3D3859] pl-3">
-              <div className="text-[10px] font-mono-num text-[#A7A9BE]">
+            <div className="border-l border-[#3D3859] pl-2.5 sm:pl-3">
+              <div className="text-[9px] sm:text-[10px] font-mono-num text-[#A7A9BE]">
+                {instantKODirectHit ? 'K.O. DIRETO · ' : ''}
                 {gameplayMode === 'CLASSIC_V1'
-                  ? `1ª VERSÃO · ${currentTeam?.isBot ? 'BOT IA' : 'HUMANO'}`
-                  : `2ª VERSÃO · ENERGIA ${activeStamina}%`}
+                  ? '1ª VERSÃO'
+                  : `ENERGIA ${activeStamina}%`}
               </div>
               <div
-                className="font-silk text-xs font-bold truncate max-w-[180px]"
+                className="font-silk text-[11px] sm:text-xs font-bold truncate max-w-[115px] sm:max-w-[180px]"
                 style={{ color: currentTeam?.color }}
               >
                 {currentTeam?.name}
@@ -1962,7 +2215,27 @@ export default function App() {
             </div>
           </div>
 
-          <div className="hidden lg:flex items-center gap-2">
+          {/* Camera Zoom Toggle (Especially helpful on Mobile & Small Screens!) */}
+          <button
+            onClick={() => setSmartCameraZoom((v) => !v)}
+            className="pointer-events-auto pixel-btn min-h-[40px] bg-[#1A1829]/95 px-2.5 py-1.5 text-[11px] font-mono-num text-[#F4F1DE] hover:text-[#FFD166] flex items-center gap-1.5 whitespace-nowrap"
+            title="Alternar entre Foco Próximo na Minhoca e Visão Panorâmica do Mapa"
+          >
+            {smartCameraZoom ? (
+              <>
+                <Minimize2 className="w-3.5 h-3.5 text-[#06D6A0]" />
+                <span>Mapa Todo</span>
+              </>
+            ) : (
+              <>
+                <Maximize2 className="w-3.5 h-3.5 text-[#FFD166]" />
+                <span>Zoom Foco</span>
+              </>
+            )}
+          </button>
+
+          {/* Desktop Team Health Ledger */}
+          <div className="hidden xl:flex items-center gap-2">
             {teams.slice(0, activeTeamCount).map((t, idx) => {
               const stat = teamHpSummary.find((s) => s.id === t.id);
               return (
@@ -1985,16 +2258,15 @@ export default function App() {
           </div>
         </div>
 
-        {/* Top-Right HUD: Wind Indicator */}
-        <div className="absolute top-3 right-4 flex items-center gap-2">
-          <div className="pixel-panel px-3.5 py-2 flex items-center gap-3 text-xs font-mono-num">
-            <Wind className="w-4 h-4 text-[#4CC9F0] shrink-0" />
+        {/* Top-Right HUD: Wind Indicator & Sound */}
+        <div className="absolute top-2 sm:top-3 right-2 sm:right-4 flex items-center gap-1.5 sm:gap-2">
+          <div className="pixel-panel px-2.5 sm:px-3.5 py-1.5 sm:py-2 flex items-center gap-2 text-[11px] sm:text-xs font-mono-num">
+            <Wind className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-[#4CC9F0] shrink-0" />
             <div>
-              <div className="flex items-center gap-2">
-                <span className="font-silk text-[11px] font-bold text-[#F4F1DE]">
-                  {hudWeather.name.toUpperCase()}
+              <div className="flex items-center gap-1.5">
+                <span className="hidden sm:inline font-silk text-[11px] font-bold text-[#F4F1DE]">
+                  {hudWeather.name.toUpperCase()} ·
                 </span>
-                <span className="text-[#A7A9BE]">·</span>
                 <span
                   className="font-bold"
                   style={{
@@ -2012,7 +2284,7 @@ export default function App() {
                 </span>
               </div>
               {gameplayMode === 'MODERN_V2' && (
-                <div className="mt-1 h-1.5 w-36 bg-[#09080E] border border-[#3D3859] relative overflow-hidden">
+                <div className="hidden sm:block mt-1 h-1.5 w-32 bg-[#09080E] border border-[#3D3859] relative overflow-hidden">
                   <div className="absolute left-1/2 top-0 bottom-0 w-0.5 bg-[#F4F1DE]/50" />
                   <div
                     className="h-full transition-all duration-100"
@@ -2039,7 +2311,7 @@ export default function App() {
               soundFX.muted = !isMuted;
               setIsMuted(!isMuted);
             }}
-            className="pixel-btn bg-[#1A1829] p-2.5 text-[#F4F1DE] hover:text-[#FFD166]"
+            className="pixel-btn min-h-[40px] min-w-[40px] bg-[#1A1829] p-2 text-[#F4F1DE] hover:text-[#FFD166] flex items-center justify-center"
             title={isMuted ? 'Ativar Som 16-Bit' : 'Silenciar Som'}
           >
             {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
@@ -2048,54 +2320,64 @@ export default function App() {
 
         {/* Level Up Celebration Toast */}
         {levelUpBanner && (
-          <div className="pointer-events-none absolute top-16 left-1/2 -translate-x-1/2 z-30 pixel-panel border-[#FFD166] bg-[#241B35] px-6 py-3 text-center animate-bounce">
+          <div className="pointer-events-none absolute top-14 sm:top-16 left-1/2 -translate-x-1/2 z-30 pixel-panel border-[#FFD166] bg-[#241B35] px-4 sm:px-6 py-2.5 sm:py-3 text-center animate-bounce w-[90vw] max-w-md">
             <div className="font-pixel text-xs text-[#FFD166]">
               SUBIU PARA O NÍVEL {levelUpBanner.level}!
             </div>
-            <div className="mt-1 text-xs text-[#06D6A0] font-semibold">
-              Novo título: {levelUpBanner.title} · Novos Feitiços Desbloqueados no Grimório!
+            <div className="mt-1 text-[11px] sm:text-xs text-[#06D6A0] font-semibold">
+              Novo título: {levelUpBanner.title} · Novos Feitiços Desbloqueados!
             </div>
           </div>
         )}
 
-        {/* Bottom Tactile Control Dock */}
-        <div className="absolute bottom-3 left-4 right-4 flex flex-wrap items-end justify-between gap-3 pointer-events-none">
-          {/* Left: Equipped Spell Card */}
-          <div className="pointer-events-auto pixel-panel p-3 flex items-center gap-3">
-            <div
-              className="w-10 h-10 shrink-0 border-2 border-[#F4F1DE]/40 flex items-center justify-center font-pixel text-xs"
-              style={{
-                background: `linear-gradient(135deg, ${currentWeapon.color} 50%, ${currentWeapon.secondaryColor} 50%)`,
-              }}
-            >
-              NV{currentWeapon.unlockLevel}
-            </div>
-            <div>
-              <div className="text-[10px] font-mono-num text-[#A7A9BE]">
-                FEITIÇO · DANO {currentWeapon.damage > 0 ? currentWeapon.damage : 'TP'}
+        {/* ====================================================================
+            BOTTOM ERGONOMIC CONTROL DOCK (Mobile Thumb-Zone & Desktop Adaptive)
+           ==================================================================== */}
+        <div className="absolute bottom-2 sm:bottom-3 left-2 sm:left-4 right-2 sm:right-4 flex flex-col lg:flex-row items-stretch lg:items-end justify-between gap-2 sm:gap-3 pointer-events-none">
+          {/* Left on Desktop / Top compact strip on Mobile: Equipped Spell Card */}
+          <div className="pointer-events-auto pixel-panel px-3 py-2 sm:p-3 flex items-center justify-between gap-2.5">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div
+                className="w-8 h-8 sm:w-10 sm:h-10 shrink-0 border-2 border-[#F4F1DE]/40 flex items-center justify-center font-pixel text-[10px] sm:text-xs"
+                style={{
+                  background: `linear-gradient(135deg, ${currentWeapon.color} 50%, ${currentWeapon.secondaryColor} 50%)`,
+                }}
+              >
+                NV{currentWeapon.unlockLevel}
               </div>
-              <div className="font-silk text-xs font-bold text-[#FFD166]">
-                {currentWeapon.name}
+              <div className="min-w-0">
+                <div className="text-[9px] sm:text-[10px] font-mono-num text-[#A7A9BE] truncate">
+                  DANO {currentWeapon.damage > 0 ? currentWeapon.damage : 'TP'} ·{' '}
+                  {instantKODirectHit ? 'K.O. DIRETO ATIVO' : `RAIO ${currentWeapon.blastRadius}px`}
+                </div>
+                <div className="font-silk text-xs font-bold text-[#FFD166] truncate">
+                  {currentWeapon.name}
+                </div>
               </div>
             </div>
             <button
               onClick={() => setIsArsenalOpen(true)}
-              className="pixel-btn bg-[#2C2747] hover:bg-[#3B345E] px-3 py-2 text-xs font-semibold text-[#F4F1DE] border-[#FFD166] whitespace-nowrap shrink-0"
+              className="pixel-btn min-h-[42px] bg-[#2C2747] hover:bg-[#3B345E] px-3 py-1.5 text-xs font-semibold text-[#F4F1DE] border-[#FFD166] whitespace-nowrap shrink-0"
             >
-              Arsenal (E)
+              Magias (E)
             </button>
           </div>
 
-          {/* Center: Mode-Specific Controls & Power Bar */}
-          <div className="pointer-events-auto pixel-panel p-3 flex flex-col gap-2 min-w-[340px] max-w-2xl flex-1">
-            <div className="flex items-center justify-between text-[11px] font-mono-num">
-              <span className="text-[#A7A9BE]">
-                {gameplayMode === 'CLASSIC_V1'
-                  ? '1ª Versão: A/D Andar · W/S Mirar · Enter Pular · Espaço Força'
-                  : '2ª Versão: Mouse Mira/Atira · A/D Andar · W Pulo Duplo · Q Mortal'}
+          {/* Center: Power Charge Bar & Continuous Hold Touch D-Pad + Fire CTA */}
+          <div className="pointer-events-auto pixel-panel p-2.5 sm:p-3 flex flex-col gap-2 flex-1 max-w-2xl">
+            <div className="flex items-center justify-between text-[10px] sm:text-[11px] font-mono-num gap-2">
+              <span className="text-[#A7A9BE] truncate">
+                <span className="hidden sm:inline">
+                  {gameplayMode === 'CLASSIC_V1'
+                    ? '1ª Versão: A/D Andar · W/S Mirar · Enter Pular · Espaço Força'
+                    : '2ª Versão: Toque/Mouse Mira · A/D Andar · W Pulo Duplo · Q Mortal'}
+                </span>
+                <span className="sm:hidden">
+                  Toque no mapa para mirar · Segure botões abaixo
+                </span>
               </span>
               <span
-                className="font-bold"
+                className="font-bold shrink-0"
                 style={{
                   color:
                     gameplayMode === 'MODERN_V2' &&
@@ -2110,13 +2392,14 @@ export default function App() {
                   ? gameplayMode === 'MODERN_V2' &&
                     chargePower >= 86 &&
                     chargePower <= 96
-                    ? `FORÇA: ${chargePower}% · CRÍTICO (+25%)!`
+                    ? `${chargePower}% CRÍTICO!`
                     : `FORÇA: ${chargePower}%`
-                  : 'SEGURE PARA LANÇAR'}
+                  : 'SEGURE DISPARO'}
               </span>
             </div>
 
-            <div className="relative h-3 w-full bg-[#09080E] border border-[#3D3859] overflow-hidden">
+            {/* Power Progress Bar */}
+            <div className="relative h-2.5 sm:h-3 w-full bg-[#09080E] border border-[#3D3859] overflow-hidden">
               {gameplayMode === 'MODERN_V2' && (
                 <div
                   className="absolute top-0 bottom-0 bg-[#00F5D4]/30 border-x border-[#00F5D4]"
@@ -2130,95 +2413,117 @@ export default function App() {
               />
             </div>
 
-            <div className="flex items-center justify-between gap-2 pt-1 flex-wrap">
-              <div className="flex items-center gap-1.5">
+            {/* Ergonomic Thumb-Zone Buttons (All >= 44px touch targets on mobile, support continuous hold!) */}
+            <div className="flex items-center justify-between gap-1.5 sm:gap-2 pt-0.5">
+              <div className="flex items-center gap-1 sm:gap-1.5 flex-wrap">
+                {/* Walk Left (Holdable) */}
                 <button
-                  onClick={() => triggerStepMove(-1)}
                   disabled={turnPhase !== 'MOVE_AND_AIM' || currentTeam?.isBot}
-                  className="pixel-btn bg-[#1F1D30] hover:bg-[#2C2942] px-2.5 py-1.5 text-xs font-mono-num text-[#F4F1DE] whitespace-nowrap"
+                  onPointerDown={() => {
+                    engineRef.current.touchMoveDir = -1;
+                  }}
+                  onPointerUp={() => {
+                    engineRef.current.touchMoveDir = 0;
+                  }}
+                  onPointerLeave={() => {
+                    engineRef.current.touchMoveDir = 0;
+                  }}
+                  onPointerCancel={() => {
+                    engineRef.current.touchMoveDir = 0;
+                  }}
+                  className="pixel-btn min-h-[44px] min-w-[44px] bg-[#1F1D30] active:bg-[#322F4B] px-2.5 py-1.5 text-xs font-mono-num text-[#F4F1DE] whitespace-nowrap"
                 >
-                  ← Andar
+                  ◀
                 </button>
+
+                {/* Walk Right (Holdable) */}
                 <button
-                  onClick={() => triggerStepMove(1)}
                   disabled={turnPhase !== 'MOVE_AND_AIM' || currentTeam?.isBot}
-                  className="pixel-btn bg-[#1F1D30] hover:bg-[#2C2942] px-2.5 py-1.5 text-xs font-mono-num text-[#F4F1DE] whitespace-nowrap"
+                  onPointerDown={() => {
+                    engineRef.current.touchMoveDir = 1;
+                  }}
+                  onPointerUp={() => {
+                    engineRef.current.touchMoveDir = 0;
+                  }}
+                  onPointerLeave={() => {
+                    engineRef.current.touchMoveDir = 0;
+                  }}
+                  onPointerCancel={() => {
+                    engineRef.current.touchMoveDir = 0;
+                  }}
+                  className="pixel-btn min-h-[44px] min-w-[44px] bg-[#1F1D30] active:bg-[#322F4B] px-2.5 py-1.5 text-xs font-mono-num text-[#F4F1DE] whitespace-nowrap"
                 >
-                  Andar →
+                  ▶
                 </button>
-                {gameplayMode === 'CLASSIC_V1' ? (
-                  <>
-                    <button
-                      onClick={() => triggerStepAim(-0.12)}
-                      disabled={turnPhase !== 'MOVE_AND_AIM' || currentTeam?.isBot}
-                      className="pixel-btn bg-[#1F1D30] hover:bg-[#2C2942] px-2.5 py-1.5 text-xs font-mono-num text-[#F4F1DE] whitespace-nowrap"
-                    >
-                      ↑ Mirar
-                    </button>
-                    <button
-                      onClick={() => triggerStepAim(0.12)}
-                      disabled={turnPhase !== 'MOVE_AND_AIM' || currentTeam?.isBot}
-                      className="pixel-btn bg-[#1F1D30] hover:bg-[#2C2942] px-2.5 py-1.5 text-xs font-mono-num text-[#F4F1DE] whitespace-nowrap"
-                    >
-                      ↓ Mirar
-                    </button>
-                    <button
-                      onClick={performJump}
-                      disabled={turnPhase !== 'MOVE_AND_AIM' || currentTeam?.isBot}
-                      className="pixel-btn bg-[#1F1D30] hover:bg-[#2C2942] px-2.5 py-1.5 text-xs font-mono-num text-[#06D6A0] whitespace-nowrap"
-                    >
-                      Pular
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <button
-                      onClick={performJump}
-                      disabled={turnPhase !== 'MOVE_AND_AIM' || currentTeam?.isBot}
-                      className="pixel-btn bg-[#1F1D30] hover:bg-[#2C2942] px-2.5 py-1.5 text-xs font-mono-num text-[#06D6A0] whitespace-nowrap"
-                    >
-                      Pulo Duplo (W)
-                    </button>
-                    <button
-                      onClick={performAcrobaticDash}
-                      disabled={turnPhase !== 'MOVE_AND_AIM' || currentTeam?.isBot}
-                      className="pixel-btn bg-[#1F1D30] hover:bg-[#2C2942] px-2.5 py-1.5 text-xs font-mono-num text-[#4CC9F0] flex items-center gap-1 whitespace-nowrap"
-                    >
-                      <Zap className="w-3 h-3" />
-                      Mortal (Q)
-                    </button>
-                    <button
-                      onClick={() => setMouseAimEnabled((v) => !v)}
-                      className={`pixel-btn px-2.5 py-1.5 text-xs font-mono-num whitespace-nowrap ${
-                        mouseAimEnabled
-                          ? 'bg-[#252338] text-[#FFD166] border-[#FFD166]/60'
-                          : 'bg-[#1F1D30] text-[#A7A9BE]'
-                      }`}
-                    >
-                      Mira Mouse: {mouseAimEnabled ? 'ON' : 'OFF'}
-                    </button>
-                  </>
+
+                {/* Aim Up (Holdable) */}
+                <button
+                  disabled={turnPhase !== 'MOVE_AND_AIM' || currentTeam?.isBot}
+                  onPointerDown={() => {
+                    engineRef.current.touchAimDir = -1;
+                  }}
+                  onPointerUp={() => {
+                    engineRef.current.touchAimDir = 0;
+                  }}
+                  onPointerLeave={() => {
+                    engineRef.current.touchAimDir = 0;
+                  }}
+                  onPointerCancel={() => {
+                    engineRef.current.touchAimDir = 0;
+                  }}
+                  className="pixel-btn min-h-[44px] min-w-[44px] bg-[#1F1D30] active:bg-[#322F4B] px-2.5 py-1.5 text-xs font-mono-num text-[#F4F1DE] whitespace-nowrap"
+                  title="Subir Mira"
+                >
+                  ▲
+                </button>
+
+                {/* Aim Down (Holdable) */}
+                <button
+                  disabled={turnPhase !== 'MOVE_AND_AIM' || currentTeam?.isBot}
+                  onPointerDown={() => {
+                    engineRef.current.touchAimDir = 1;
+                  }}
+                  onPointerUp={() => {
+                    engineRef.current.touchAimDir = 0;
+                  }}
+                  onPointerLeave={() => {
+                    engineRef.current.touchAimDir = 0;
+                  }}
+                  onPointerCancel={() => {
+                    engineRef.current.touchAimDir = 0;
+                  }}
+                  className="pixel-btn min-h-[44px] min-w-[44px] bg-[#1F1D30] active:bg-[#322F4B] px-2.5 py-1.5 text-xs font-mono-num text-[#F4F1DE] whitespace-nowrap"
+                  title="Descer Mira"
+                >
+                  ▼
+                </button>
+
+                {/* Jump / Double Jump */}
+                <button
+                  onClick={performJump}
+                  disabled={turnPhase !== 'MOVE_AND_AIM' || currentTeam?.isBot}
+                  className="pixel-btn min-h-[44px] bg-[#1F1D30] hover:bg-[#2C2942] px-2.5 sm:px-3 py-1.5 text-xs font-mono-num text-[#06D6A0] whitespace-nowrap"
+                >
+                  {gameplayMode === 'CLASSIC_V1' ? 'Pular' : 'Pulo 2x'}
+                </button>
+
+                {/* Acrobatic Backflip in Modern V2 */}
+                {gameplayMode === 'MODERN_V2' && (
+                  <button
+                    onClick={performAcrobaticDash}
+                    disabled={turnPhase !== 'MOVE_AND_AIM' || currentTeam?.isBot}
+                    className="pixel-btn min-h-[44px] bg-[#1F1D30] hover:bg-[#2C2942] px-2.5 py-1.5 text-xs font-mono-num text-[#4CC9F0] flex items-center gap-1 whitespace-nowrap"
+                  >
+                    <Zap className="w-3.5 h-3.5" />
+                    <span className="hidden sm:inline">Mortal</span>
+                  </button>
                 )}
               </div>
 
+              {/* Primary Hold-to-Fire Action Button */}
               <button
                 disabled={turnPhase !== 'MOVE_AND_AIM' || currentTeam?.isBot}
-                onMouseDown={() => {
-                  const st = engineRef.current;
-                  if (st.phase === 'MOVE_AND_AIM' && !currentTeam?.isBot) {
-                    st.charging = true;
-                    st.power = 15;
-                    st.powerDirection = 1;
-                    setIsCharging(true);
-                  }
-                }}
-                onMouseUp={() => {
-                  const st = engineRef.current;
-                  if (st.charging) {
-                    fireSelectedWeapon(Math.max(20, st.power));
-                  }
-                }}
-                onTouchStart={(e) => {
+                onPointerDown={(e) => {
                   e.preventDefault();
                   const st = engineRef.current;
                   if (st.phase === 'MOVE_AND_AIM' && !currentTeam?.isBot) {
@@ -2228,22 +2533,28 @@ export default function App() {
                     setIsCharging(true);
                   }
                 }}
-                onTouchEnd={(e) => {
+                onPointerUp={(e) => {
                   e.preventDefault();
                   const st = engineRef.current;
                   if (st.charging) {
                     fireSelectedWeapon(Math.max(20, st.power));
                   }
                 }}
-                className="pixel-btn bg-[#FFD166] hover:bg-[#FFC233] px-4 py-1.5 text-xs font-bold text-[#0F0E17] border-[#FFD166] flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                onPointerCancel={() => {
+                  const st = engineRef.current;
+                  if (st.charging) {
+                    fireSelectedWeapon(Math.max(20, st.power));
+                  }
+                }}
+                className="pixel-btn min-h-[44px] bg-[#FFD166] hover:bg-[#FFC233] px-3.5 sm:px-5 py-2 text-xs font-bold text-[#0F0E17] border-[#FFD166] flex items-center gap-1.5 whitespace-nowrap shrink-0"
               >
-                <Flame className="w-3.5 h-3.5" />
-                Segurar Disparo
+                <Flame className="w-4 h-4 shrink-0" />
+                <span>ATIRAR</span>
               </button>
             </div>
           </div>
 
-          {/* Right: XP & Level Progression Status Card */}
+          {/* Right (Desktop XL): XP & Level Progression Status Card */}
           <div className="pointer-events-auto pixel-panel p-3 hidden xl:flex items-center gap-3">
             <Compass className="w-5 h-5 text-[#06D6A0] shrink-0" />
             <div>
@@ -2256,7 +2567,7 @@ export default function App() {
                   onClick={() => setIsArsenalOpen(true)}
                   className="text-[#FFD166] underline hover:text-[#06D6A0]"
                 >
-                  Ver Desbloqueios
+                  Desbloqueios
                 </button>
               </div>
             </div>
@@ -2282,10 +2593,10 @@ export default function App() {
               <div className="mt-4 bg-[#141220] border border-[#3D3859] p-3 text-xs font-mono-num text-[#F4F1DE]">
                 Nível Atual: {progression.level} · Total: {progression.xp} XP
               </div>
-              <div className="mt-5 flex items-center justify-center gap-3">
+              <div className="mt-5 flex items-center justify-center gap-3 flex-wrap">
                 <button
                   onClick={() => setIsTitleScreenOpen(true)}
-                  className="pixel-btn bg-[#252338] px-4 py-2 text-xs font-semibold text-[#FFD166] whitespace-nowrap"
+                  className="pixel-btn min-h-[44px] bg-[#252338] px-4 py-2 text-xs font-semibold text-[#FFD166] whitespace-nowrap"
                 >
                   Escolher Versão
                 </button>
@@ -2293,7 +2604,7 @@ export default function App() {
                   onClick={() =>
                     initMatch(teams, activeTeamCount, selectedBiomeId, gameplayMode)
                   }
-                  className="pixel-btn bg-[#06D6A0] px-4 py-2 text-xs font-bold text-[#0F0E17] border-[#06D6A0] whitespace-nowrap"
+                  className="pixel-btn min-h-[44px] bg-[#06D6A0] px-4 py-2 text-xs font-bold text-[#0F0E17] border-[#06D6A0] whitespace-nowrap"
                 >
                   Jogar Novamente
                 </button>
@@ -2308,6 +2619,8 @@ export default function App() {
         <TitleScreen
           currentMode={gameplayMode}
           progression={progression}
+          instantKODirectHit={instantKODirectHit}
+          onToggleInstantKO={() => setInstantKODirectHit((v) => !v)}
           onSelectModeAndStart={(chosenMode) => {
             setGameplayMode(chosenMode);
             setIsTitleScreenOpen(false);
@@ -2342,10 +2655,18 @@ export default function App() {
         teams={teams}
         activeTeamCount={activeTeamCount}
         selectedBiomeId={selectedBiomeId}
-        onSaveConfig={(updatedTeams, newCount, newBiome, shouldRestart) => {
+        instantKODirectHit={instantKODirectHit}
+        onSaveConfig={(
+          updatedTeams,
+          newCount,
+          newBiome,
+          newInstantKO,
+          shouldRestart
+        ) => {
           setTeams(updatedTeams);
           setActiveTeamCount(newCount);
           setSelectedBiomeId(newBiome);
+          setInstantKODirectHit(newInstantKO);
           if (shouldRestart) {
             initMatch(updatedTeams, newCount, newBiome, gameplayMode);
           } else {
@@ -2366,6 +2687,8 @@ export default function App() {
         onToggleTrajectory={() => setShowTrajectory((v) => !v)}
         highParticles={highParticles}
         onToggleParticles={() => setHighParticles((v) => !v)}
+        instantKODirectHit={instantKODirectHit}
+        onToggleInstantKO={() => setInstantKODirectHit((v) => !v)}
       />
     </div>
   );

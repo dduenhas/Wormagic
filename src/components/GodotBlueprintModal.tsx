@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Check, Code2, Copy, Cpu, X } from 'lucide-react';
+import { Check, Code2, Copy, Cpu, Flame, X } from 'lucide-react';
 
 interface GodotBlueprintModalProps {
   isOpen: boolean;
@@ -8,6 +8,8 @@ interface GodotBlueprintModalProps {
   onToggleTrajectory: () => void;
   highParticles: boolean;
   onToggleParticles: () => void;
+  instantKODirectHit: boolean;
+  onToggleInstantKO: () => void;
 }
 
 const GODOT_SCRIPTS: Record<string, { title: string; filename: string; code: string }> = {
@@ -63,33 +65,26 @@ func _rebuild_collision_bitmap() -> void:
         static_body.add_child(col)`,
   },
   worm: {
-    title: 'Minhoca Arcana & Personalização (CharacterBody2D)',
+    title: 'Minhoca Arcana & Arremesso K.O. (CharacterBody2D)',
     filename: 'res://scripts/ArcaneWorm.gd',
     code: `extends CharacterBody2D
 class_name ArcaneWorm
 
 @export var team_id: int = 0
 @export var worm_name: String = "Pitágoras"
-@export var max_hp: int = 100
+@export var instant_ko_direct_hit: bool = false
 var hp: int = 100
-var aim_angle: float = -0.35
-var facing: int = 1
+var is_launching_out: bool = false
 
-# Sistema de Personalização Estética modular em camadas Node2D
-@export_enum("classic_pink", "forest_moss", "glacial_blue", "astral_violet") var skin_id: String = "classic_pink"
-@export_enum("wizard", "grad_cap", "leaf_crown", "beret", "none") var hat_id: String = "wizard"
-@export_enum("hb_pencil", "oak_branch", "fountain_pen", "crystal_ruler") var wand_id: String = "hb_pencil"
-
-const GRAVITY: float = 680.0
-const WALK_SPEED: float = 95.0
-const JUMP_FORCE: float = -290.0
-
-func _physics_process(delta: float) -> void:
-    if not is_on_floor():
-        velocity.y += GRAVITY * delta
-    move_and_slide()
-
-func apply_blast_impulse(origin: Vector2, blast_radius: float, max_damage: int, knockback: float) -> void:
+func apply_blast_impulse(origin: Vector2, blast_radius: float, max_damage: int, knockback: float, direct_hit: bool) -> void:
+    if instant_ko_direct_hit and direct_hit:
+        # Eliminação imediata jogando o oponente girando para fora do cenário
+        is_launching_out = true
+        collision_layer = 0
+        collision_mask = 0
+        var dir_x := 1.0 if global_position.x >= origin.x else -1.0
+        velocity = Vector2(dir_x * 920.0, -980.0)
+        return
     var dist := global_position.distance_to(origin)
     if dist > blast_radius:
         return
@@ -110,19 +105,6 @@ var current_xp: int = 0
 var current_level: int = 1
 const THRESHOLDS := {1: 0, 2: 150, 3: 350, 4: 600, 5: 900}
 
-const SPELL_UNLOCK_LEVEL := {
-    "eraser_bomb": 1,      # Borracha Explosiva
-    "chalk_cluster": 1,    # Granada de Giz Arcano
-    "gouache_jet": 1,      # Tubo de Guache Marinho
-    "solar_fireball": 2,   # Esfera Solar de Lupa
-    "paper_plane": 2,      # Aviãozinho de Papel Eólico
-    "compass_lightning": 3,# Compasso Para-Raios
-    "thorn_seed": 3,       # Semente de Herbário
-    "heavy_backpack": 4,   # Mochila de Enciclopédias
-    "meteor_protractor": 5,# Transferidor Astral
-    "crystal_ruler_tp": 5  # Régua de Dobra Espacial
-}
-
 func add_xp(amount: int) -> void:
     current_xp += amount
     for lvl in range(5, 1, -1):
@@ -140,6 +122,8 @@ export const GodotBlueprintModal: React.FC<GodotBlueprintModalProps> = ({
   onToggleTrajectory,
   highParticles,
   onToggleParticles,
+  instantKODirectHit,
+  onToggleInstantKO,
 }) => {
   const [activeTab, setActiveTab] = useState<'terrain' | 'worm' | 'progression'>('terrain');
   const [copied, setCopied] = useState(false);
@@ -155,44 +139,66 @@ export const GodotBlueprintModal: React.FC<GodotBlueprintModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4">
-      <div className="pixel-panel w-full max-w-4xl p-6 text-[#F4F1DE]">
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/80 p-0 sm:p-4">
+      <div className="pixel-panel w-full max-w-4xl p-4 sm:p-6 text-[#F4F1DE] max-h-[92dvh] overflow-y-auto rounded-t-2xl sm:rounded-none">
         {/* Header */}
-        <div className="flex items-center justify-between gap-4 border-b-2 border-[#3D3859] pb-4">
-          <div className="flex items-center gap-3">
-            <Cpu className="w-6 h-6 text-[#4CC9F0]" />
+        <div className="flex items-center justify-between gap-3 border-b-2 border-[#3D3859] pb-3 sm:pb-4">
+          <div className="flex items-center gap-2.5">
+            <Cpu className="w-5 h-5 sm:w-6 sm:h-6 text-[#4CC9F0] shrink-0" />
             <div>
-              <h2 className="font-pixel text-base md:text-lg text-[#4CC9F0]">
-                OTIMIZAÇÃO DE MOTOR & SCRIPTS GODOT 4.X
+              <h2 className="font-pixel text-xs sm:text-base md:text-lg text-[#4CC9F0]">
+                OPÇÕES DE MOTOR & SCRIPTS GODOT 4.X
               </h2>
-              <p className="mt-1 text-xs text-[#A7A9BE]">
-                Ajuste o pipeline BitMap 2D em tempo real ou copie os scripts GDScript otimizados para Godot 4.
+              <p className="mt-1 text-[11px] sm:text-xs text-[#A7A9BE]">
+                Configure regras de física, eliminação direta e exporte os scripts GDScript.
               </p>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="pixel-btn bg-[#252338] px-3 py-1.5 text-xs font-semibold text-[#F4F1DE] hover:bg-[#322F4B] flex items-center gap-1.5 whitespace-nowrap shrink-0"
+            className="pixel-btn min-h-[44px] bg-[#252338] px-3.5 py-2 text-xs font-semibold text-[#F4F1DE] hover:bg-[#322F4B] flex items-center gap-1.5 whitespace-nowrap shrink-0"
           >
             <X className="w-4 h-4" />
             Fechar
           </button>
         </div>
 
-        {/* Live Engine Performance Toggles */}
-        <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3 bg-[#141220] border-2 border-[#2E2A44] p-4">
-          <div className="flex items-center justify-between gap-3">
+        {/* Live Engine & Rule Toggles */}
+        <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-3 bg-[#141220] border-2 border-[#2E2A44] p-3.5 sm:p-4">
+          <div className="flex items-center justify-between gap-3 bg-[#1B192B] p-2.5 border border-[#3D3859]">
             <div>
-              <div className="text-xs font-semibold text-[#F4F1DE]">
-                Previsão de Trajetória Balística
+              <div className="text-xs font-semibold text-[#FFD166] flex items-center gap-1.5">
+                <Flame className="w-3.5 h-3.5" />
+                Eliminação ao Acertar
               </div>
               <div className="text-[11px] text-[#A7A9BE]">
-                Calcula gravidade + vento antes do disparo
+                Joga o oponente para fora do cenário
+              </div>
+            </div>
+            <button
+              onClick={onToggleInstantKO}
+              className={`pixel-btn min-h-[40px] px-3 py-1.5 text-xs font-bold whitespace-nowrap shrink-0 ${
+                instantKODirectHit
+                  ? 'bg-[#EF476F] text-[#F4F1DE] border-[#FFD166]'
+                  : 'bg-[#1F1D30] text-[#A7A9BE]'
+              }`}
+            >
+              {instantKODirectHit ? 'ATIVADA' : 'PADRÃO (OFF)'}
+            </button>
+          </div>
+
+          <div className="flex items-center justify-between gap-3 bg-[#1B192B] p-2.5 border border-[#3D3859]">
+            <div>
+              <div className="text-xs font-semibold text-[#F4F1DE]">
+                Trajetória Previsora
+              </div>
+              <div className="text-[11px] text-[#A7A9BE]">
+                Calcula gravidade + vento
               </div>
             </div>
             <button
               onClick={onToggleTrajectory}
-              className={`pixel-btn px-3 py-1.5 text-xs font-semibold whitespace-nowrap shrink-0 ${
+              className={`pixel-btn min-h-[40px] px-3 py-1.5 text-xs font-semibold whitespace-nowrap shrink-0 ${
                 showTrajectory
                   ? 'bg-[#06D6A0] text-[#0F0E17] border-[#06D6A0]'
                   : 'bg-[#1F1D30] text-[#A7A9BE]'
@@ -202,31 +208,31 @@ export const GodotBlueprintModal: React.FC<GodotBlueprintModalProps> = ({
             </button>
           </div>
 
-          <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center justify-between gap-3 bg-[#1B192B] p-2.5 border border-[#3D3859]">
             <div>
               <div className="text-xs font-semibold text-[#F4F1DE]">
-                Pool de Partículas Pixel 16-Bit
+                Partículas Pixel 16-Bit
               </div>
               <div className="text-[11px] text-[#A7A9BE]">
-                Detritos de giz, faíscas e folhas nas explosões
+                Detritos de giz e faíscas
               </div>
             </div>
             <button
               onClick={onToggleParticles}
-              className={`pixel-btn px-3 py-1.5 text-xs font-semibold whitespace-nowrap shrink-0 ${
+              className={`pixel-btn min-h-[40px] px-3 py-1.5 text-xs font-semibold whitespace-nowrap shrink-0 ${
                 highParticles
                   ? 'bg-[#FFD166] text-[#0F0E17] border-[#FFD166]'
                   : 'bg-[#1F1D30] text-[#A7A9BE]'
               }`}
             >
-              {highParticles ? 'Alta Densidade' : 'Modo Leve'}
+              {highParticles ? 'Alta' : 'Leve'}
             </button>
           </div>
         </div>
 
         {/* GDScript Tabs */}
         <div className="mt-4 flex items-center justify-between gap-2 flex-wrap">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 overflow-x-auto pb-1">
             {(
               [
                 ['terrain', 'DestructibleTerrain.gd'],
@@ -237,7 +243,7 @@ export const GodotBlueprintModal: React.FC<GodotBlueprintModalProps> = ({
               <button
                 key={key}
                 onClick={() => setActiveTab(key)}
-                className={`pixel-btn px-3 py-1.5 text-xs font-mono-num flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
+                className={`pixel-btn min-h-[40px] px-3 py-1.5 text-xs font-mono-num flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
                   activeTab === key
                     ? 'bg-[#2C2747] border-[#4CC9F0] text-[#4CC9F0]'
                     : 'bg-[#1B192B] text-[#A7A9BE]'
@@ -251,15 +257,15 @@ export const GodotBlueprintModal: React.FC<GodotBlueprintModalProps> = ({
 
           <button
             onClick={handleCopy}
-            className="pixel-btn bg-[#252338] hover:bg-[#322F4B] px-3 py-1.5 text-xs font-semibold text-[#FFD166] flex items-center gap-1.5 whitespace-nowrap shrink-0"
+            className="pixel-btn min-h-[40px] bg-[#252338] hover:bg-[#322F4B] px-3 py-1.5 text-xs font-semibold text-[#FFD166] flex items-center gap-1.5 whitespace-nowrap shrink-0"
           >
             {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-            {copied ? 'GDScript Copiado!' : 'Copiar Script Godot 4'}
+            {copied ? 'Copiado!' : 'Copiar GDScript'}
           </button>
         </div>
 
         {/* Code Viewer */}
-        <div className="mt-3 bg-[#09080E] border-2 border-[#3D3859] p-4 max-h-[42vh] overflow-y-auto">
+        <div className="mt-3 bg-[#09080E] border-2 border-[#3D3859] p-3.5 sm:p-4 max-h-[38dvh] overflow-y-auto">
           <div className="text-[11px] font-mono-num text-[#A7A9BE] mb-2">
             {currentScript.title} · {currentScript.filename}
           </div>

@@ -46,37 +46,37 @@ export const ArsenalModal: React.FC<ArsenalModalProps> = ({
     progression.unlockAllSandbox || progression.level >= w.unlockLevel;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4">
-      <div className="pixel-panel w-full max-w-4xl p-6 text-[#F4F1DE]">
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/80 p-0 sm:p-4">
+      <div className="pixel-panel w-full max-w-4xl p-4 sm:p-6 text-[#F4F1DE] max-h-[92dvh] overflow-y-auto rounded-t-2xl sm:rounded-none">
         {/* Header */}
-        <div className="flex flex-wrap items-center justify-between gap-4 border-b-2 border-[#3D3859] pb-4">
+        <div className="flex items-center justify-between gap-3 border-b-2 border-[#3D3859] pb-3 sm:pb-4">
           <div>
-            <h2 className="font-pixel text-base md:text-lg text-[#FFD166]">
+            <h2 className="font-pixel text-xs sm:text-base md:text-lg text-[#FFD166]">
               GRIMÓRIO ESCOLAR & ELEMENTAL
             </h2>
-            <p className="mt-1 text-xs text-[#A7A9BE]">
-              Ganhe XP causando dano, coletando tomos e vencendo turnos para desbloquear novos feitiços.
+            <p className="mt-1 text-[11px] sm:text-xs text-[#A7A9BE]">
+              Toque em uma magia desbloqueada para equipá-la no turno atual.
             </p>
           </div>
           <button
             onClick={onClose}
-            className="pixel-btn bg-[#252338] px-3 py-1.5 text-xs font-semibold text-[#F4F1DE] hover:bg-[#322F4B] flex items-center gap-1.5 whitespace-nowrap shrink-0"
+            className="pixel-btn min-h-[44px] bg-[#252338] px-3.5 py-2 text-xs font-semibold text-[#F4F1DE] hover:bg-[#322F4B] flex items-center gap-1.5 whitespace-nowrap shrink-0"
           >
             <X className="w-4 h-4" />
-            Fechar (ESC)
+            Fechar
           </button>
         </div>
 
         {/* Progression & XP Bar */}
-        <div className="mt-4 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4 bg-[#141220] border-2 border-[#2E2A44] p-4">
+        <div className="mt-3 sm:mt-4 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 sm:gap-4 bg-[#141220] border-2 border-[#2E2A44] p-3.5 sm:p-4">
           <div className="flex-1">
-            <div className="flex items-center justify-between text-xs">
+            <div className="flex items-center justify-between text-xs gap-2 flex-wrap">
               <span className="font-silk font-bold text-[#06D6A0]">
                 NÍVEL {progression.level} · {currentThreshold.title.toUpperCase()}
               </span>
               <span className="font-mono-num text-[#FFD166]">
                 {progression.xp} XP{' '}
-                {nextThreshold ? `/ ${nextThreshold.xpRequired} XP (Próx. Nível)` : '· NÍVEL MÁXIMO'}
+                {nextThreshold ? `/ ${nextThreshold.xpRequired} XP` : '· MÁXIMO'}
               </span>
             </div>
             <div className="mt-2 h-3 w-full bg-[#09080E] border border-[#3D3859] overflow-hidden">
@@ -87,31 +87,30 @@ export const ArsenalModal: React.FC<ArsenalModalProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="grid grid-cols-2 sm:flex items-center gap-2 shrink-0">
             <button
               onClick={onGrantStudyXp}
-              className="pixel-btn bg-[#2A244D] hover:bg-[#39306B] px-3 py-2 text-xs font-semibold text-[#FFD166] flex items-center gap-1.5 whitespace-nowrap shrink-0"
-              title="Adiciona +200 XP imediatamente para testar desbloqueios de níveis"
+              className="pixel-btn min-h-[44px] bg-[#2A244D] hover:bg-[#39306B] px-3 py-2 text-xs font-semibold text-[#FFD166] flex items-center justify-center gap-1.5 whitespace-nowrap"
             >
-              <Sparkles className="w-3.5 h-3.5" />
-              Estudar Grimório (+200 XP)
+              <Sparkles className="w-3.5 h-3.5 shrink-0" />
+              +200 XP Estudo
             </button>
             <button
               onClick={onToggleSandboxUnlock}
-              className={`pixel-btn px-3 py-2 text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
+              className={`pixel-btn min-h-[44px] px-3 py-2 text-xs font-semibold flex items-center justify-center gap-1.5 whitespace-nowrap ${
                 progression.unlockAllSandbox
                   ? 'bg-[#06D6A0] text-[#0F0E17] border-[#06D6A0]'
                   : 'bg-[#1F1D30] text-[#A7A9BE] hover:text-[#F4F1DE]'
               }`}
             >
-              <Zap className="w-3.5 h-3.5" />
-              {progression.unlockAllSandbox ? 'Modo Livre: Ativo' : 'Liberar Tudo'}
+              <Zap className="w-3.5 h-3.5 shrink-0" />
+              {progression.unlockAllSandbox ? 'Tudo Liberado' : 'Liberar Tudo'}
             </button>
           </div>
         </div>
 
         {/* 2x5 Arsenal Grid */}
-        <div className="mt-5 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 max-h-[55vh] overflow-y-auto pr-1">
+        <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5 sm:gap-3">
           {SPELL_ARSENAL.map((weapon, idx) => {
             const unlocked = isWeaponUnlocked(weapon);
             const ammoCount = currentTeam.ammo[weapon.id];
@@ -126,7 +125,7 @@ export const ArsenalModal: React.FC<ArsenalModalProps> = ({
                   onSelectWeapon(weapon.id);
                   onClose();
                 }}
-                className={`text-left p-3 border-2 transition-transform flex flex-col justify-between ${
+                className={`text-left p-3 border-2 transition-transform flex flex-col justify-between min-h-[110px] ${
                   isSelected
                     ? 'bg-[#2C2747] border-[#FFD166]'
                     : unlocked && !outOfAmmo
@@ -152,7 +151,7 @@ export const ArsenalModal: React.FC<ArsenalModalProps> = ({
                     </span>
                   </div>
 
-                  <div className="mt-2 flex items-center gap-2">
+                  <div className="mt-1.5 flex items-center gap-2">
                     <span
                       className="w-4 h-4 shrink-0 border border-white/30"
                       style={{
@@ -165,12 +164,12 @@ export const ArsenalModal: React.FC<ArsenalModalProps> = ({
                   </div>
 
                   <p className="mt-1 text-[11px] text-[#FFD166]">{weapon.subtitle}</p>
-                  <p className="mt-2 text-[11px] text-[#A7A9BE] leading-relaxed">
+                  <p className="mt-1.5 text-[11px] text-[#A7A9BE] leading-relaxed">
                     {weapon.description}
                   </p>
                 </div>
 
-                <div className="mt-3 pt-2 border-t border-[#2E2A44] flex items-center justify-between text-[11px] font-mono-num text-[#F4F1DE]">
+                <div className="mt-2.5 pt-2 border-t border-[#2E2A44] flex items-center justify-between text-[11px] font-mono-num text-[#F4F1DE]">
                   <span>DANO: {weapon.damage > 0 ? weapon.damage : 'TP'}</span>
                   <span>·</span>
                   <span>RAIO: {weapon.blastRadius}px</span>

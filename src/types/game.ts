@@ -75,6 +75,8 @@ export interface WormUnit {
   jumpsUsed: number;
   stamina: number; // 0..100 per turn for jetpack/dash/walk
   isAlive: boolean;
+  isLaunchingOut?: boolean; // True when hit in Direct-Hit KO mode and flying out of the arena
+  launchSpin?: number; // Rotation angle during out-of-arena launch animation
   cosmetics: WormCosmetics;
   speechBubble?: { text: string; timer: number };
   burnStacks?: number;
@@ -106,6 +108,7 @@ export interface ActiveProjectile {
   secondaryColor: string;
   isChildFragment?: boolean;
   isCriticalShot?: boolean;
+  directHitWormId?: string;
   trailHistory: { x: number; y: number }[];
 }
 
@@ -137,12 +140,17 @@ export interface ThermalZone {
   y: number;
   width: number;
   height: number;
-  liftForce: number; // negative vy (updraft) or vortex
+  liftForce: number;
   swirlForce: number;
   label: string;
 }
 
-export type WeatherConditionId = 'CALM_BREEZE' | 'GALE_STORM' | 'UPDRAFT_THERMAL' | 'TURBULENT_GUSTS' | 'TAILWIND_RUSH';
+export type WeatherConditionId =
+  | 'CALM_BREEZE'
+  | 'GALE_STORM'
+  | 'UPDRAFT_THERMAL'
+  | 'TURBULENT_GUSTS'
+  | 'TAILWIND_RUSH';
 
 export interface WeatherState {
   conditionId: WeatherConditionId;
@@ -150,7 +158,7 @@ export interface WeatherState {
   description: string;
   baseWindX: number;
   currentWindX: number;
-  currentWindY: number; // vertical updraft/downdraft
+  currentWindY: number;
   gustPhase: number;
   gustAmplitude: number;
   gustFrequency: number;

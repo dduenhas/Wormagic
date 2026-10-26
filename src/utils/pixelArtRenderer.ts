@@ -376,7 +376,8 @@ export function drawPixelWorm(
   cosmetics: WormCosmetics,
   isCurrentTurn: boolean,
   timeTick: number,
-  vy: number = 0
+  vy: number = 0,
+  launchSpin: number = 0
 ) {
   const skin = SKIN_OPTIONS.find((s) => s.id === cosmetics.skin) || SKIN_OPTIONS[0];
   const wand = WAND_OPTIONS.find((w) => w.id === cosmetics.wand) || WAND_OPTIONS[0];
@@ -384,12 +385,17 @@ export function drawPixelWorm(
   ctx.save();
   ctx.translate(Math.round(x), Math.round(y));
 
-  // Squash & Stretch based on vertical velocity for modern responsive feel
-  const stretchY = Math.max(0.84, Math.min(1.18, 1 - vy * 0.025));
-  const squashX = 1 / stretchY;
-  ctx.scale(facing * squashX, stretchY);
+  if (launchSpin !== 0) {
+    ctx.rotate(launchSpin);
+    ctx.scale(1.18, 1.18);
+  } else {
+    // Squash & Stretch based on vertical velocity for modern responsive feel
+    const stretchY = Math.max(0.84, Math.min(1.18, 1 - vy * 0.025));
+    const squashX = 1 / stretchY;
+    ctx.scale(facing * squashX, stretchY);
+  }
 
-  const bob = Math.sin(timeTick * 0.12) > 0 ? -1 : 0;
+  const bob = launchSpin !== 0 ? 0 : Math.sin(timeTick * 0.12) > 0 ? -1 : 0;
 
   // 1. Tail & Lower Body Segments
   ctx.fillStyle = skin.shade;
@@ -409,8 +415,8 @@ export function drawPixelWorm(
   ctx.fillStyle = skin.primary;
   ctx.fillRect(-3, -9 + bob, 9, 10);
 
-  // 3. Expressive Pixel Eyes
-  ctx.fillStyle = '#FFFFFF';
+  // 3. Expressive Pixel Eyes (Star/Dizzy eyes if being launched out!)
+  ctx.fillStyle = launchSpin !== 0 ? '#FFD166' : '#FFFFFF';
   ctx.fillRect(1, -7 + bob, 3, 4);
   ctx.fillRect(4, -7 + bob, 3, 4);
 
