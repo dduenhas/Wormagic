@@ -243,7 +243,15 @@ export default function App() {
   const [progression, setProgression] = useState<PlayerProgression>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY_PROGRESSION);
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        const parsed = JSON.parse(saved) as PlayerProgression;
+        // Sanitize XP if previously inflated by the 60FPS victory loop bug
+        if (typeof parsed.xp === 'number' && parsed.xp > 15000) {
+          parsed.xp = 1250;
+          parsed.level = 5;
+        }
+        return parsed;
+      }
     } catch {
       // ignore storage errors
     }
@@ -300,9 +308,9 @@ export default function App() {
   const [chargePower, setChargePower] = useState<number>(0);
   const [isCharging, setIsCharging] = useState<boolean>(false);
   const [activeStamina, setActiveStamina] = useState<number>(100);
-  const [turnPhase, setTurnPhase] = useState<'MOVE_AND_AIM' | 'PROJECTILE_FLYING' | 'POST_SHOT'>(
-    'MOVE_AND_AIM'
-  );
+  const [turnPhase, setTurnPhase] = useState<
+    'MOVE_AND_AIM' | 'PROJECTILE_FLYING' | 'POST_SHOT' | 'VICTORY'
+  >('MOVE_AND_AIM');
   const [teamHpSummary, setTeamHpSummary] = useState<
     { id: number; totalHp: number; aliveCount: number }[]
   >([]);
@@ -325,7 +333,8 @@ export default function App() {
     activeWormId: string;
     weather: WeatherState;
     turnTimeLeft: number;
-    phase: 'MOVE_AND_AIM' | 'PROJECTILE_FLYING' | 'POST_SHOT';
+    phase: 'MOVE_AND_AIM' | 'PROJECTILE_FLYING' | 'POST_SHOT' | 'VICTORY';
+    victoryAwarded: boolean;
     postShotDelay: number;
     charging: boolean;
     power: number;
@@ -359,6 +368,7 @@ export default function App() {
     weather: createWeatherForMode('MODERN_V2'),
     turnTimeLeft: TURN_TIME_SECONDS,
     phase: 'MOVE_AND_AIM',
+    victoryAwarded: false,
     postShotDelay: 0,
     charging: false,
     power: 0,
@@ -542,6 +552,7 @@ export default function App() {
         weather: initialWeather,
         turnTimeLeft: TURN_TIME_SECONDS,
         phase: 'MOVE_AND_AIM',
+        victoryAwarded: false,
         postShotDelay: 0,
         charging: false,
         power: 0,
@@ -578,11 +589,17 @@ export default function App() {
   // Advance to next alive team & worm turn (triggers the Turn Spotlight Zoom-In -> Wide Overview camera!)
   const advanceTurn = useCallback(() => {
     const st = engineRef.current;
+    if (st.phase === 'VICTORY' || st.victoryAwarded) return;
+
     const aliveTeams = new Set(
       st.worms.filter((w) => w.isAlive && !w.isLaunchingOut).map((w) => w.teamId)
     );
 
     if (aliveTeams.size <= 1) {
+      st.victoryAwarded = true;
+      st.phase = 'VICTORY';
+      st.postShotDelay = 0;
+      setTurnPhase('VICTORY');
       const winnerId = Array.from(aliveTeams)[0];
       const winTeam = teams[winnerId] || teams[0];
       setVictoryTeam(winTeam);
@@ -1922,7 +1939,7 @@ export default function App() {
         st.phase = 'POST_SHOT';
         st.postShotDelay = 55;
         setTurnPhase('POST_SHOT');
-      } else if (st.phase === 'POST_SHOT') {
+      } else if (st.phase === 'POST_SHOT' && !st.victoryAwarded) {
         if (!anyWormLaunching) {
           st.postShotDelay--;
           if (st.postShotDelay <= 0) {
