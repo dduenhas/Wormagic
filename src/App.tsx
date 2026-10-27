@@ -1,15 +1,18 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   BookOpen,
+  Bot,
   Compass,
   Cpu,
   Flame,
+  GraduationCap,
   Layers,
   Palette,
   RotateCcw,
   Settings,
   SkipForward,
   Sparkles,
+  Users,
   Volume2,
   VolumeX,
   Wind,
@@ -18,7 +21,8 @@ import {
 } from 'lucide-react';
 import { ArsenalModal } from './components/ArsenalModal';
 import { GodotBlueprintModal } from './components/GodotBlueprintModal';
-import { TitleScreen } from './components/TitleScreen';
+import { PedagogicalModal } from './components/PedagogicalModal';
+import { OpponentMatchMode, TitleScreen } from './components/TitleScreen';
 import { WardrobeModal } from './components/WardrobeModal';
 import {
   BATTLE_CRIES,
@@ -262,7 +266,13 @@ export default function App() {
   }, [progression]);
 
   // Game Config State
-  const [teams, setTeams] = useState<TeamConfig[]>(INITIAL_TEAMS);
+  const [opponentMode, setOpponentMode] = useState<OpponentMatchMode>('PLAYER_VS_CPU');
+  const [teams, setTeams] = useState<TeamConfig[]>(() =>
+    INITIAL_TEAMS.map((t, idx) => ({
+      ...t,
+      isBot: idx >= 1, // Default to Player 1 (Human) vs Team 2+ (CPU)
+    }))
+  );
   const [activeTeamCount, setActiveTeamCount] = useState<number>(2);
   const [selectedBiomeId, setSelectedBiomeId] = useState<BiomeId>('blackboard_forest');
   const [selectedWeaponId, setSelectedWeaponId] = useState<WeaponId>('eraser_bomb');
@@ -271,6 +281,7 @@ export default function App() {
   const [isArsenalOpen, setIsArsenalOpen] = useState(false);
   const [isWardrobeOpen, setIsWardrobeOpen] = useState(false);
   const [isGodotModalOpen, setIsGodotModalOpen] = useState(false);
+  const [isPedagogicalOpen, setIsPedagogicalOpen] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [showTrajectory, setShowTrajectory] = useState(true);
   const [highParticles, setHighParticles] = useState(true);
@@ -1001,7 +1012,11 @@ export default function App() {
 
   // Initialize first match on mount
   useEffect(() => {
-    initMatch(INITIAL_TEAMS, 2, 'blackboard_forest', 'MODERN_V2');
+    const initialCpuTeams = INITIAL_TEAMS.map((t, idx) => ({
+      ...t,
+      isBot: idx >= 1,
+    }));
+    initMatch(initialCpuTeams, 2, 'blackboard_forest', 'MODERN_V2');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1080,11 +1095,18 @@ export default function App() {
   // Keyboard Listeners
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (isTitleScreenOpen || isArsenalOpen || isWardrobeOpen || isGodotModalOpen) {
+      if (
+        isTitleScreenOpen ||
+        isArsenalOpen ||
+        isWardrobeOpen ||
+        isGodotModalOpen ||
+        isPedagogicalOpen
+      ) {
         if (e.key === 'Escape') {
           setIsArsenalOpen(false);
           setIsWardrobeOpen(false);
           setIsGodotModalOpen(false);
+          setIsPedagogicalOpen(false);
         }
         return;
       }
@@ -1162,6 +1184,7 @@ export default function App() {
     isArsenalOpen,
     isWardrobeOpen,
     isGodotModalOpen,
+    isPedagogicalOpen,
     gameplayMode,
     progression.level,
     progression.unlockAllSandbox,
@@ -1179,6 +1202,7 @@ export default function App() {
         isArsenalOpen ||
         isWardrobeOpen ||
         isGodotModalOpen ||
+        isPedagogicalOpen ||
         isJoystickSettingsOpen ||
         victoryTeam
       )
@@ -1198,6 +1222,7 @@ export default function App() {
     isArsenalOpen,
     isWardrobeOpen,
     isGodotModalOpen,
+    isPedagogicalOpen,
     isJoystickSettingsOpen,
     victoryTeam,
     advanceTurn,
@@ -1439,19 +1464,50 @@ export default function App() {
             }
           }
         } else {
-          // Smart Ballistic Bot AI: simulates candidate arcs to avoid blowing itself up on hills
+          // Smart Ballistic Bot AI (Player vs CPU): walks tactically, picks unlocked spells, and simulates arcs
           st.botThinkingTimer--;
-          if (st.botThinkingTimer === 35) {
+
+          // Phase 1 (frames 68..45): Bot takes a few tactical steps toward the center/enemy
+          if (st.botThinkingTimer <= 68 && st.botThinkingTimer > 45) {
             const enemies = st.worms.filter(
               (w) => w.isAlive && !w.isLaunchingOut && w.teamId !== activeWorm.teamId
             );
             if (enemies.length > 0) {
-              const weapon =
-                SPELL_ARSENAL.find((w) => w.id === selectedWeaponId) || SPELL_ARSENAL[0];
+              const nearest = enemies[0];
+              const stepDir: 1 | -1 = nearest.x >= activeWorm.x ? 1 : -1;
+              activeWorm.facing = stepDir;
+              const nextCheckX = activeWorm.x + stepDir * 18;
+              if (
+                nextCheckX > 55 &&
+                nextCheckX < CANVAS_W - 55 &&
+                isPixelSolid(nextCheckX, activeWorm.y + 12)
+              ) {
+                activeWorm.vx = activeWorm.vx * 0.6 + stepDir * 0.75;
+              }
+            }
+          } else if (st.botThinkingTimer === 38) {
+            // Phase 2: Bot chooses an unlocked offensive spell with ammo and simulates trajectories
+            const enemies = st.worms.filter(
+              (w) => w.isAlive && !w.isLaunchingOut && w.teamId !== activeWorm.teamId
+            );
+            if (enemies.length > 0) {
+              const botAmmo = currentTeam?.ammo || {};
+              const availableWeapons = SPELL_ARSENAL.filter(
+                (w) =>
+                  w.projectileType !== 'teleport' &&
+                  (progression.unlockAllSandbox || progression.level >= w.unlockLevel) &&
+                  (botAmmo[w.id] === -1 || (botAmmo[w.id] ?? 0) > 0)
+              );
+              const chosenBotWeapon =
+                availableWeapons.length > 0
+                  ? availableWeapons[Math.floor(Math.random() * availableWeapons.length)]
+                  : SPELL_ARSENAL[0];
+              setSelectedWeaponId(chosenBotWeapon.id);
+
               const grav =
-                weapon.projectileType === 'glider'
+                chosenBotWeapon.projectileType === 'glider'
                   ? 0.085
-                  : weapon.projectileType === 'heavy_drop'
+                  : chosenBotWeapon.projectileType === 'heavy_drop'
                   ? 0.34
                   : 0.21;
 
@@ -1478,8 +1534,10 @@ export default function App() {
                     let hitSelfRisk = false;
 
                     for (let step = 0; step < 85; step++) {
-                      svx += st.weather.currentWindX * 0.011 * weapon.windFactor;
-                      svy += grav + st.weather.currentWindY * weapon.windFactor;
+                      svx +=
+                        st.weather.currentWindX * 0.011 * chosenBotWeapon.windFactor;
+                      svy +=
+                        grav + st.weather.currentWindY * chosenBotWeapon.windFactor;
                       sx += svx;
                       sy += svy;
 
@@ -2263,6 +2321,8 @@ export default function App() {
     gameplayMode,
     instantKODirectHit,
     joystickConfig,
+    progression.level,
+    progression.unlockAllSandbox,
     teams,
     activeTeamCount,
     selectedBiomeId,
@@ -2424,13 +2484,42 @@ export default function App() {
         </a>
 
         {/* Zone 2: Concise Single-Line Action Links */}
-        <nav className="flex items-center gap-5 text-xs font-medium text-[#A7A9BE] overflow-x-auto no-scrollbar py-0.5">
+        <nav className="flex items-center gap-4 text-xs font-medium text-[#A7A9BE] overflow-x-auto no-scrollbar py-0.5">
           <button
             onClick={() => setIsTitleScreenOpen(true)}
             className="hover:text-[#FFD166] transition-colors flex items-center gap-1 whitespace-nowrap shrink-0"
           >
             <Layers className="w-3.5 h-3.5" />
             {gameplayMode === 'CLASSIC_V1' ? '1ª Versão' : '2ª Versão'}
+          </button>
+          <button
+            onClick={() => {
+              const nextOpp: OpponentMatchMode =
+                opponentMode === 'PLAYER_VS_CPU'
+                  ? 'LOCAL_MULTIPLAYER'
+                  : 'PLAYER_VS_CPU';
+              setOpponentMode(nextOpp);
+              const updated = teams.map((t, idx) => ({
+                ...t,
+                isBot: nextOpp === 'PLAYER_VS_CPU' ? idx >= 1 : false,
+              }));
+              setTeams(updated);
+              initMatch(updated, activeTeamCount, selectedBiomeId, gameplayMode);
+            }}
+            className="hover:text-[#4CC9F0] transition-colors flex items-center gap-1 whitespace-nowrap shrink-0 text-[#4CC9F0]"
+            title="Alternar entre Jogar contra o Computador (Player vs CPU) e Multiplayer Local"
+          >
+            {opponentMode === 'PLAYER_VS_CPU' ? (
+              <>
+                <Bot className="w-3.5 h-3.5" />
+                1P vs CPU
+              </>
+            ) : (
+              <>
+                <Users className="w-3.5 h-3.5 text-[#FFD166]" />
+                <span className="text-[#FFD166]">Multiplayer Local</span>
+              </>
+            )}
           </button>
           <button
             onClick={() => setIsArsenalOpen(true)}
@@ -2445,6 +2534,14 @@ export default function App() {
           >
             <Palette className="w-3.5 h-3.5" />
             Config & Equipes
+          </button>
+          <button
+            onClick={() => setIsPedagogicalOpen(true)}
+            className="hover:text-[#FFD166] transition-colors flex items-center gap-1 whitespace-nowrap shrink-0 text-[#FFD166]"
+            title="Fundamentação Pedagógica, Filosofia do Jogo e Alinhamento com a BNCC"
+          >
+            <GraduationCap className="w-4 h-4" />
+            Pedagogia & BNCC
           </button>
           <button
             onClick={() => setIsGodotModalOpen(true)}
@@ -2554,6 +2651,13 @@ export default function App() {
               Modo
             </button>
             <button
+              onClick={() => setIsPedagogicalOpen(true)}
+              className="h-8 w-8 rounded-full bg-black/35 backdrop-blur-[2px] border border-[#FFD166]/50 text-[#FFD166] flex items-center justify-center"
+              title="Fundamentação Pedagógica & BNCC"
+            >
+              <GraduationCap className="w-4 h-4" />
+            </button>
+            <button
               onClick={() => setIsJoystickSettingsOpen(true)}
               className="h-8 w-8 rounded-full bg-black/35 backdrop-blur-[2px] border border-white/20 text-[#FFD166] flex items-center justify-center"
               title="Sensibilidade do Joystick"
@@ -2590,6 +2694,7 @@ export default function App() {
             </div>
             <div className="border-l border-[#3D3859] pl-3">
               <div className="text-[10px] font-mono-num text-[#A7A9BE]">
+                {currentTeam?.isBot ? '🤖 VEZ DA CPU · ' : ''}
                 {instantKODirectHit ? 'K.O. DIRETO · ' : ''}
                 {gameplayMode === 'CLASSIC_V1'
                   ? '1ª VERSÃO'
@@ -2673,6 +2778,14 @@ export default function App() {
               )}
             </div>
           </div>
+
+          <button
+            onClick={() => setIsPedagogicalOpen(true)}
+            className="pixel-btn min-h-[40px] min-w-[40px] bg-[#241B35] border-[#FFD166] p-2 text-[#FFD166] hover:text-[#06D6A0] flex items-center justify-center"
+            title="Fundamentação Pedagógica, Filosofia do Jogo e BNCC"
+          >
+            <GraduationCap className="w-4 h-4" />
+          </button>
 
           <button
             onClick={() => {
@@ -2997,19 +3110,45 @@ export default function App() {
       {isTitleScreenOpen && (
         <TitleScreen
           currentMode={gameplayMode}
+          opponentMode={opponentMode}
+          onChangeOpponentMode={(newOppMode) => {
+            setOpponentMode(newOppMode);
+            setTeams((prev) =>
+              prev.map((t, idx) => ({
+                ...t,
+                isBot: newOppMode === 'PLAYER_VS_CPU' ? idx >= 1 : false,
+              }))
+            );
+          }}
           progression={progression}
           instantKODirectHit={instantKODirectHit}
           onToggleInstantKO={() => setInstantKODirectHit((v) => !v)}
-          onSelectModeAndStart={(chosenMode) => {
+          onSelectModeAndStart={(chosenMode, opponentOverride) => {
+            const targetOpp = opponentOverride || opponentMode;
+            setOpponentMode(targetOpp);
+            const configuredTeams = teams.map((t, idx) => ({
+              ...t,
+              isBot: targetOpp === 'PLAYER_VS_CPU' ? idx >= 1 : false,
+            }));
+            setTeams(configuredTeams);
             setGameplayMode(chosenMode);
             setIsTitleScreenOpen(false);
-            initMatch(teams, activeTeamCount, selectedBiomeId, chosenMode);
+            initMatch(configuredTeams, activeTeamCount, selectedBiomeId, chosenMode);
           }}
           onOpenWardrobe={() => {
             setIsWardrobeOpen(true);
           }}
+          onOpenPedagogical={() => {
+            setIsPedagogicalOpen(true);
+          }}
         />
       )}
+
+      {/* Pedagogical & BNCC Foundation Modal (Graduation Cap Icon) */}
+      <PedagogicalModal
+        isOpen={isPedagogicalOpen}
+        onClose={() => setIsPedagogicalOpen(false)}
+      />
 
       {/* Modals */}
       <ArsenalModal
