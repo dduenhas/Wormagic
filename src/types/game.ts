@@ -109,6 +109,7 @@ export interface ActiveProjectile {
   isChildFragment?: boolean;
   isCriticalShot?: boolean;
   directHitWormId?: string;
+  shooterId?: string;
   trailHistory: { x: number; y: number }[];
 }
 

@@ -302,9 +302,9 @@ export function drawWormAimHUD(
   ctx.lineWidth = 2;
   ctx.beginPath();
   if (facing === 1) {
-    ctx.arc(0, 0, radius, -1.42, 0.85);
+    ctx.arc(0, 0, radius, -1.42, 0.42);
   } else {
-    ctx.arc(0, 0, radius, Math.PI - 0.85, Math.PI + 1.42);
+    ctx.arc(0, 0, radius, Math.PI - 0.42, Math.PI + 1.42);
   }
   ctx.stroke();
 
